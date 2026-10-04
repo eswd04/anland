@@ -113,6 +113,83 @@ default `1`; applied when a window attaches):
 
 5. Manage containers and launch apps with [anland-shell](https://github.com/SuperTurtleDev/anland-shell).
 
+## Starting the desktop
+
+`anland-launch` — installed into `~/.local/bin` by `setupanlandx.sh` — is the
+entry point. The session it needs is already running: `anland-session.service`
+is a systemd *user* unit that comes up on login, links the daemon's socket into
+the user runtime dir as `wayland-anland`, and publishes the app environment in
+`~/.anlandx-env`.
+
+```sh
+anland-launch desktop          # the whole Plasma desktop, in ONE Android window
+anland-launch desktop stop     # stop it again
+anland-launch app <command>    # a single app, in its own Android window
+anland-launch status           # what is running
+```
+
+The mode is chosen per client by which socket it connects to, so both can run at
+once: in **desktop mode** KWin connects to anland and the apps inside it speak to
+KWin; in **app mode** the app connects to anland directly.
+
+The launcher also sets the environment the nested compositor needs — every entry
+below is established by testing, not documentation:
+
+| Variable | Why |
+|---|---|
+| `MESA_LOADER_DRIVER_OVERRIDE=msm` | the session exports `kgsl`, which breaks GBM/EGL here: EGL then reports no DRM node and KWin refuses to start |
+| `KWIN_DISABLE_VULKAN=1` | Turnip lacks `VK_EXT_physical_device_drm`, which KWin needs to map a Vulkan device to a DRM node |
+| `QT_QPA_PLATFORM=wayland` | Qt apps must take the Wayland platform plugin rather than XCB |
+| `WAYLAND_DISPLAY=wayland-anland` | the daemon's socket, as linked into the user runtime dir |
+
+Desktop mode starts `startplasma-wayland`, not a hand-rolled
+`kwin_wayland` + `plasmashell`: the latter gets plasmashell SIGKILLed within
+seconds while KWin survives (no OOM involved — `oom_score_adj` was -1000).
+
+For a stock compositor to work unmodified, the daemon has to offer the protocols
+KWin treats as hard requirements: `wl_compositor` ≥ v4, `zwp_linux_dmabuf_v1` ≥
+v4 with `zwp_linux_dmabuf_feedback_v1`, `wp_single_pixel_buffer_manager_v1`,
+`wp_presentation`, `wp_viewporter` (plus `wl_seat`,
+`zwp_pointer_constraints_v1`, `zwp_relative_pointer_manager_v1`). `wl_output`
+advertises the panel's real refresh rate and re-announces it when the rate or the
+window size changes.
+
+## Window settings
+
+While a window is open, its behaviour is set on the host APK's settings screen
+(`am start -n com.anlandnext/com.anlandnext.WlSettingsActivity` from a root
+shell, or through anland-shell). Options marked *(daemon)* are stored by the
+daemon in its own `config.json` and applied to windows configured from then on;
+the rest are APK-local.
+
+- **Screen mode** *(daemon)* — how the client canvas relates to the Android
+  window. *Exact 1:1* (`canvas_w`/`canvas_h` = `-2`) makes the canvas the window,
+  so the client renders one buffer pixel per panel pixel: never resampled, never
+  cropped, and zoom has no effect on it. *Follow window / zoom* (`-1`) divides
+  the window by the zoom, so the desktop fills the window at the requested size
+  (a window wider than the zoomed canvas is cropped). *Desktop canvas* (a fixed
+  size such as 1920x1080) configures every client for that canvas and fits it
+  into the window with letterbox bars — the way to show a whole 16:9 desktop on
+  a tall panel.
+- **Edge inset** — reserves a band the height of the system status bar out of
+  the surface, on the window's **long** axis: top and bottom in portrait, left
+  and right in landscape. It keeps the client's own toolbar and the panel's
+  rounded corners from overlapping; the surface shrinking is also what makes the
+  client reflow.
+- **On-screen touchpad** — use the window as a laptop pad: one finger moves the
+  pointer, tap clicks, long-press-then-drag drags, two fingers scroll, two-finger
+  tap right-clicks.
+- **Shortcut key bar** — Esc, Tab, Ctrl, Alt, Shift, Super, arrows, Enter,
+  Backspace. The modifiers latch: tap to hold, tap again to release.
+- **IME display mode** — *inset* shrinks the surface so the client reflows above
+  the keyboard; *overlay* lets the keyboard float over the content.
+- **Renderer** *(daemon)* — `sc_enabled`: the SurfaceControl backend (zero-copy,
+  HWC planes) or the EGL renderer (smoother surface movement, one GPU composite
+  per frame).
+- **Refresh rate** *(daemon)* — `refresh_hz`: `0` (default) detects the panel's
+  offered rate at the current resolution and re-samples it when a window
+  attaches; a positive value pins it.
+
 ## Build
 
 Linux host with JDK 17, an Android SDK (`ANDROID_HOME` and `JAVA_HOME` set; missing pieces are auto-installed), plus meson/ninja/patch for the audio part.

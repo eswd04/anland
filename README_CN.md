@@ -103,6 +103,66 @@ flowchart LR
 
 5. 用 [anland-shell](https://github.com/SuperTurtleDev/anland-shell) 管理容器、启动应用。
 
+## 启动界面
+
+`anland-launch` 是入口（由 `setupanlandx.sh` 安装到 `~/.local/bin`）。它依赖的会话已经
+在运行：`anland-session.service` 是一个 systemd **用户**服务，登录时自动启动，把守护进程
+的 socket 链接到用户运行时目录下的 `wayland-anland`，并把应用环境写入 `~/.anlandx-env`。
+
+```sh
+anland-launch desktop          # 整个 Plasma 桌面，装进一个 Android 窗口
+anland-launch desktop stop     # 停止
+anland-launch app <命令>        # 单个应用，拥有自己的 Android 窗口
+anland-launch status           # 查看当前运行状态
+```
+
+模式由客户端连接哪个 socket 决定，因此两者可以同时运行：**桌面模式**下 KWin 连接
+anland，桌面里的应用与 KWin 通信；**应用模式**下应用直接连接 anland。
+
+启动器同时设置嵌套合成器所需的环境。下表每一项都是实测结论，不是文档抄来的：
+
+| 变量 | 原因 |
+|---|---|
+| `MESA_LOADER_DRIVER_OVERRIDE=msm` | 会话导出的是 `kgsl`，而 `kgsl` 在这里会破坏 GBM/EGL：EGL 报没有 DRM 节点，KWin 拒绝启动 |
+| `KWIN_DISABLE_VULKAN=1` | Turnip 缺少 `VK_EXT_physical_device_drm`，而 KWin 需要它把 Vulkan 设备映射到 DRM 节点 |
+| `QT_QPA_PLATFORM=wayland` | 强制 Qt 应用使用 Wayland 平台插件而不是 XCB |
+| `WAYLAND_DISPLAY=wayland-anland` | 守护进程的 socket 在用户运行时目录中的链接名 |
+
+桌面模式启动的是 `startplasma-wayland`，而不是手工组合 `kwin_wayland` + `plasmashell`：
+后者会让 plasmashell 在几秒内被 SIGKILL，而 KWin 存活（与内存无关，`oom_score_adj` 为
+-1000）。
+
+要让原版合成器不加修改地跑起来，守护进程必须提供 KWin 视为硬性要求的协议：
+`wl_compositor` ≥ v4、带 `zwp_linux_dmabuf_feedback_v1` 的 `zwp_linux_dmabuf_v1` ≥ v4、
+`wp_single_pixel_buffer_manager_v1`、`wp_presentation`、`wp_viewporter`（以及 `wl_seat`、
+`zwp_pointer_constraints_v1`、`zwp_relative_pointer_manager_v1`）。`wl_output` 通告面板
+的真实刷新率，并在刷新率或窗口尺寸变化时重新通告。
+
+## 窗口设置
+
+窗口打开后，其行为在宿主 APK 的设置页调整（在 root shell 中执行
+`am start -n com.anlandnext/com.anlandnext.WlSettingsActivity`，或经由 anland-shell）。
+标注 *(守护进程)* 的项由守护进程保存在自己的 `config.json` 中，对之后配置的窗口生效；
+其余为 APK 本地设置。
+
+- **屏幕模式** *(守护进程)* —— 客户端画布与 Android 窗口的关系。*精确 1:1*
+  （`canvas_w`/`canvas_h` = `-2`）令画布等于窗口，客户端一个缓冲像素对应一个面板像素：
+  不重采样、不裁剪，缩放对它无效。*跟随窗口/缩放*（`-1`）用窗口除以缩放倍率，桌面按请求
+  的尺寸铺满窗口（比缩放后画布更宽的窗口会被裁掉）。*桌面画布*（如固定 1920x1080）让每个
+  客户端按该画布布局，再等比适配进窗口并留黑边——这是在竖屏上展示完整 16:9 桌面的方式。
+- **边缘留白** —— 在窗口**长边**方向留出系统状态栏高度的空白：竖屏在上下，横屏在左右。
+  避免客户端自己的工具栏与面板圆角重叠；表面收缩本身也会让客户端重新排版。
+- **屏幕触控板** —— 把窗口当笔记本触控板：单指移动指针，轻点即左键，长按后拖动即拖拽，
+  双指滚动，双指轻点为右键。
+- **快捷键栏** —— Esc、Tab、Ctrl、Alt、Shift、Super、方向键、Enter、退格。修饰键为锁定式：
+  点一下按住，再点一下松开。
+- **输入法显示模式** —— *inset* 收缩表面，让客户端在键盘上方重新排版；*overlay* 让键盘
+  浮在内容之上。
+- **渲染后端** *(守护进程)* —— `sc_enabled`：SurfaceControl 后端（零拷贝、走 HWC 图层）
+  或 EGL 渲染器（表面移动更顺滑，每帧一次 GPU 合成）。
+- **刷新率** *(守护进程)* —— `refresh_hz`：`0`（默认）按当前分辨率检测面板可提供的刷新率，
+  并在窗口挂载时重新采样；正数则固定该值。
+
 ## 构建
 
 需要 Linux 主机、JDK 17、Android SDK（设置 `ANDROID_HOME` 与 `JAVA_HOME`；缺失组件自动安装），音频部分另需 meson/ninja/patch。

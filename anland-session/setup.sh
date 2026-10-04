@@ -13,6 +13,7 @@
 # the checks below catch anything still missing. Installs:
 #   ~/.local/bin/anland-miniwm            compiled from miniwm.c
 #   ~/.local/bin/anland-session           the session starter
+#   ~/.local/bin/anland-launch            desktop / app / status launcher
 #   ~/.local/bin/bwrap                    bubblewrap 0.11.1 + the mountinfo
 #                                         index fix (patches/bubblewrap/),
 #                                         ALWAYS installed: the distro bwrap
@@ -117,6 +118,9 @@ fi
 mkdir -p "$BIN" "$UNIT_DIR"
 cc -O2 -Wall -o "$BIN/anland-miniwm" miniwm.c -lX11 -lXcomposite
 install -m 755 anland-session.sh "$BIN/anland-session"
+# the launch entry point (desktop / app / status) — see the README's
+# "Starting the desktop" section; sits next to the session starter it drives
+install -m 755 anland-launch.sh "$BIN/anland-launch"
 install -m 644 anland-session.service "$UNIT_DIR/anland-session.service"
 
 # bwrap with the mountinfo index fix — installed unconditionally: the fixed

@@ -272,6 +272,7 @@ anlandx:
 	mkdir -p "$(OUT)/anlandx/bubblewrap" "$(OUT)/anlandx/xserver"
 	cp anland-session/miniwm.c anland-session/anland-session.sh \
 	   anland-session/anland-session.service anland-session/deps_noble.sh \
+	   anland-session/anland-launch.sh \
 	   LICENSE "$(OUT)/anlandx/"
 	cp anland-session/setup.sh "$(OUT)/anlandx/setupanlandx.sh"
 	cp -r patches "$(OUT)/anlandx/patches"
