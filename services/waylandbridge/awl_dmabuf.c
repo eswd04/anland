@@ -1,11 +1,26 @@
-/* awl_dmabuf.c — zwp_linux_dmabuf_v1 v3 (registers the buffer; a commit dup's
+/* awl_dmabuf.c — zwp_linux_dmabuf_v1 v4 (registers the buffer; a commit dup's
  * its fd into the surface's frame queue, awl_surface_apply_buffer, and the
- * renderer imports the EGLImage from the queue element) */
+ * renderer imports the EGLImage from the queue element).
+ *
+ * v4: the format/modifier events are deprecated and must not be sent; the
+ * capabilities travel in a zwp_linux_dmabuf_feedback_v1 object instead
+ * (format table + main device + one tranche). v1..v3 clients still get the
+ * legacy events, and both paths describe the same (format, modifier) set. */
+#define _GNU_SOURCE     /* bionic: memfd_create */
 #include "awl_internal.h"
 
+#include <errno.h>
 #include <string.h>
-#include <sys/stat.h>   /* fstat once at buffer creation: dma-buf inode */
+#include <sys/mman.h>   /* memfd_create, mmap — the feedback format table */
+#include <sys/stat.h>   /* fstat: dma-buf inode, and the DRM node's st_rdev */
+#include <sys/types.h>  /* dev_t */
 #include <unistd.h>
+
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+
+#define AWL_DMABUF_VERSION 4   /* feedback-capable; <4 gets the legacy events */
 
 /* v3 event flow: params.created(buffer); create_immed builds the buffer directly */
 
@@ -83,6 +98,170 @@ static struct awl_buffer* dmabuf_buffer_create(struct wl_client* client,
             (char)((format >> 16) & 0xff), (char)((format >> 24) & 0xff),
             (unsigned long long)modifier, fd);
     return b;
+}
+
+/* ---------------- zwp_linux_dmabuf_feedback_v1 (v4) ----------------
+ * The client asks for a feedback object (default, or per surface) and reads:
+ *   format_table  a shared memory table of {u32 format, u32 pad, u64 modifier}
+ *   main_device   the dev_t clients should allocate on
+ *   one tranche   target device + the table indices that are usable, closed by
+ *                 tranche_done; the object is closed by done()
+ * The description is static: anland imports whatever this table describes as
+ * an EGLImage, so nothing changes with surface size — get_surface_feedback
+ * returns the same set as get_default_feedback. */
+
+/* wire layout of one format_table entry (see the protocol description) */
+struct awl_fmt_table_entry {
+    uint32_t format;
+    uint32_t padding;
+    uint64_t modifier;
+};
+
+/* DRM render node the clients allocate on, as a dev_t, resolved once. The
+ * clients run in a container where the node is bind-mounted at the same path,
+ * so st_rdev is directly usable as the "which device" identity they need to
+ * recognise. ANLAND_DRM_DEVICE is the override the in-container session
+ * already exports. */
+static dev_t drm_device_id(void) {
+    static dev_t cached;
+    static int have;
+    if (!have) {
+        const char* p = getenv("ANLAND_DRM_DEVICE");
+        if (!p || !*p) p = "/dev/dri/renderD128";
+        struct stat st;
+        if (stat(p, &st) == 0)
+            cached = st.st_rdev;
+        else
+            LOGE("dmabuf: stat %s failed: %s — feedback advertises no device",
+                 p, strerror(errno));
+        have = 1;
+        if (cached)
+            LOGI("dmabuf: feedback device %s → dev_t %llu", p,
+                 (unsigned long long)cached);
+    }
+    return cached;
+}
+
+/* append one dev_t to a wl_array in the wire shape the client expects (the
+ * array carries the raw dev_t bytes) */
+static int array_add_device(struct wl_array* a, dev_t dev) {
+    void* p = wl_array_add(a, sizeof(dev));
+    if (!p)
+        return -1;
+    memcpy(p, &dev, sizeof(dev));
+    return 0;
+}
+
+static void feedback_finish(struct wl_resource* res) {
+    zwp_linux_dmabuf_feedback_v1_send_done(res);
+}
+
+static void feedback_send(struct wl_resource* res) {
+    const size_t n = sizeof(k_supported) / sizeof(k_supported[0]);
+    const size_t bytes = n * sizeof(struct awl_fmt_table_entry);
+    dev_t dev = drm_device_id();
+    struct wl_array a;
+
+    /* format table: a memfd the client mmaps */
+    int fd = memfd_create("awl-dmabuf-fmt", MFD_CLOEXEC);
+    if (fd < 0) {
+        LOGE("dmabuf: format table memfd failed: %s", strerror(errno));
+        feedback_finish(res);
+        return;
+    }
+    if (ftruncate(fd, (off_t)bytes) != 0) {
+        LOGE("dmabuf: format table ftruncate failed: %s", strerror(errno));
+        close(fd);
+        feedback_finish(res);
+        return;
+    }
+    void* map = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) {
+        LOGE("dmabuf: format table mmap failed: %s", strerror(errno));
+        close(fd);
+        feedback_finish(res);
+        return;
+    }
+    struct awl_fmt_table_entry* tab = map;
+    for (size_t i = 0; i < n; i++) {
+        tab[i].format = k_supported[i].format;
+        tab[i].padding = 0;
+        tab[i].modifier = k_supported[i].modifier;
+    }
+    munmap(map, bytes);
+    lseek(fd, 0, SEEK_SET);
+    zwp_linux_dmabuf_feedback_v1_send_format_table(res, fd, (uint32_t)bytes);
+    close(fd);
+
+    /* main_device */
+    wl_array_init(&a);
+    if (array_add_device(&a, dev) != 0) {
+        wl_array_release(&a);
+        feedback_finish(res);
+        return;
+    }
+    zwp_linux_dmabuf_feedback_v1_send_main_device(res, &a);
+    wl_array_release(&a);
+
+    /* one tranche: the (single) device clients should use, every table index,
+     * no flags */
+    wl_array_init(&a);
+    if (array_add_device(&a, dev) != 0) {
+        wl_array_release(&a);
+        feedback_finish(res);
+        return;
+    }
+    zwp_linux_dmabuf_feedback_v1_send_tranche_target_device(res, &a);
+    wl_array_release(&a);
+
+    wl_array_init(&a);
+    uint16_t* idx = wl_array_add(&a, n * sizeof(uint16_t));
+    if (idx) {
+        for (size_t i = 0; i < n; i++)
+            idx[i] = (uint16_t)i;
+        zwp_linux_dmabuf_feedback_v1_send_tranche_formats(res, &a);
+    }
+    wl_array_release(&a);
+
+    zwp_linux_dmabuf_feedback_v1_send_tranche_flags(res, 0);
+    zwp_linux_dmabuf_feedback_v1_send_tranche_done(res);
+    feedback_finish(res);
+}
+
+static void feedback_destroy(struct wl_client* c, struct wl_resource* res) {
+    wl_resource_destroy(res);
+}
+
+static const struct zwp_linux_dmabuf_feedback_v1_interface feedback_iface = {
+    .destroy = feedback_destroy,
+};
+
+/* Both requests hand out the same static description. */
+static void dmabuf_new_feedback(struct wl_client* c, struct wl_resource* res,
+                                uint32_t id) {
+    struct wl_resource* fb = wl_resource_create(
+            c, &zwp_linux_dmabuf_feedback_v1_interface,
+            wl_resource_get_version(res), id);
+    if (!fb) {
+        wl_client_post_no_memory(c);
+        return;
+    }
+    wl_resource_set_implementation(fb, &feedback_iface, NULL, NULL);
+    feedback_send(fb);
+}
+
+static void dmabuf_get_default_feedback(struct wl_client* c,
+                                        struct wl_resource* res, uint32_t id) {
+    LOGD("get_default_feedback id=%u", id);
+    dmabuf_new_feedback(c, res, id);
+}
+
+static void dmabuf_get_surface_feedback(struct wl_client* c,
+                                        struct wl_resource* res, uint32_t id,
+                                        struct wl_resource* surface) {
+    (void)surface;   /* per-surface feedback would be identical */
+    LOGD("get_surface_feedback id=%u", id);
+    dmabuf_new_feedback(c, res, id);
 }
 
 /* ---------------- zwp_linux_buffer_params_v1 ---------------- */
@@ -212,14 +391,24 @@ static void dmabuf_destroy(struct wl_client* c, struct wl_resource* res) {
 static const struct zwp_linux_dmabuf_v1_interface dmabuf_iface = {
     .destroy = dmabuf_destroy,
     .create_params = dmabuf_create_params,
+    /* v4; never invoked by a v<4 client */
+    .get_default_feedback = dmabuf_get_default_feedback,
+    .get_surface_feedback = dmabuf_get_surface_feedback,
 };
 
 static void dmabuf_bind(struct wl_client* client, void* data,
                         uint32_t version, uint32_t id) {
-    uint32_t v = version < 3 ? version : 3;
+    uint32_t v = version < AWL_DMABUF_VERSION ? version : AWL_DMABUF_VERSION;
     struct wl_resource* res = wl_resource_create(
             client, &zwp_linux_dmabuf_v1_interface, v, id);
     wl_resource_set_implementation(res, &dmabuf_iface, NULL, NULL);
+    /* v4 deprecated the format/modifier events: sending them to a modern
+     * client is a protocol violation — it reads the capabilities from the
+     * feedback object instead. */
+    if (v >= 4) {
+        LOGD("dmabuf bind v%u (feedback mode)", v);
+        return;
+    }
     for (size_t i = 0; i < sizeof(k_supported) / sizeof(k_supported[0]); i++) {
         zwp_linux_dmabuf_v1_send_format(res, k_supported[i].format);
         if (v >= ZWP_LINUX_DMABUF_V1_MODIFIER_SINCE_VERSION)
@@ -232,7 +421,7 @@ static void dmabuf_bind(struct wl_client* client, void* data,
 
 void awl_dmabuf_setup(void) {
     if (!wl_global_create(g_srv.display,
-                          &zwp_linux_dmabuf_v1_interface, 3,
+                          &zwp_linux_dmabuf_v1_interface, AWL_DMABUF_VERSION,
                           NULL, dmabuf_bind))
         LOGE("zwp_linux_dmabuf_v1 global create failed");
 }
