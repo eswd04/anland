@@ -109,8 +109,13 @@ public final class WireInput {
      * ==================================================================== */
 
     /**
-     * A row of keys a phone keyboard cannot send: Esc, Tab, Ctrl, Alt, Shift,
-     * Super, the arrows, Enter, Backspace.
+     * Two rows of keys a phone keyboard cannot send, plus the window controls
+     * (the IME toggle, the touch/touchpad switch and the settings screen).
+     *
+     * Two rows rather than one: at 14 keys a single row gave each key 24.7 dp
+     * while the labels are 13 sp — "Shift" needs about 30 dp and ran into
+     * "Super" before the Pad key was even added. Two rows give every key about
+     * 48 dp, which is also the size a finger wants.
      *
      * Modifiers are LATCHED: tapping Ctrl sends a key-down and keeps it down
      * until tapped again, so the compositor tracks the modifier state itself
@@ -124,22 +129,31 @@ public final class WireInput {
         private static final class Key {
             final String label; final int code;
             final boolean modifier;
-            /** Special keys (the keyboard toggle) run this instead of sending
-             *  a keycode — they are window controls, not keystrokes. */
+            /** Special keys (the keyboard toggle, the settings screen) run this
+             *  instead of sending a keycode — they are window controls, not
+             *  keystrokes. */
             final Runnable action;
+            /** Which row it sits in. Rows are laid out independently, so they
+             *  need not hold the same number of keys. */
+            final int row;
             boolean on;
             RectF rect = new RectF();
-            Key(String label, int code, boolean modifier) {
-                this(label, code, modifier, null);
+            Key(String label, int code, boolean modifier, int row) {
+                this(label, code, modifier, null, row);
             }
-            Key(String label, Runnable action) {
-                this(label, 0, false, action);
+            Key(String label, Runnable action, int row) {
+                this(label, 0, false, action, row);
             }
-            Key(String label, int code, boolean modifier, Runnable action) {
+            Key(String label, int code, boolean modifier, Runnable action, int row) {
                 this.label = label; this.code = code; this.modifier = modifier;
-                this.action = action;
+                this.action = action; this.row = row;
             }
         }
+
+        /** Row 0: the mode switches and the modifiers. Row 1: the keys. */
+        private static final int ROWS = 2;
+        private static final float ROW_H = 32f;    /* dp, one row of keys */
+        private static final float ROW_PAD = 3f;   /* dp, around and between rows */
 
         private final List<Key> keys = new ArrayList<>();
         /** The touch/touchpad switch, or null when the window does not offer one. */
@@ -149,36 +163,52 @@ public final class WireInput {
         private final Paint fg = new Paint(Paint.ANTI_ALIAS_FLAG);
         private int downIndex = -1;
 
+        /** Height in pixels of a key bar. The window reserves exactly this many
+         *  pixels out of the desktop surface, so the reservation and the drawn
+         *  bar have to come from one place — they drifted apart the moment the
+         *  bar changed height, because the reservation was a hardcoded 38 dp. */
+        public static int heightPx(Context c) {
+            float d = c.getResources().getDisplayMetrics().density;
+            return Math.round((ROW_H * ROWS + ROW_PAD * (ROWS + 1)) * d);
+        }
+
         /** @param imeToggle run by the keyboard key — summons/dismisses the
          *  Android IME (the bridge that feeds the text-input protocol). May be
          *  null when the summon ability is unavailable.
          *  @param pad the touch/touchpad switch, or null for no such key. Its
-         *  key shows the current mode through the usual on/off highlight. */
-        public KeyBar(Context c, WinId winId, Runnable imeToggle, TouchpadToggle pad) {
+         *  key shows the current mode through the usual on/off highlight.
+         *  @param settings opens the host app's settings screen, or null. */
+        public KeyBar(Context c, WinId winId, Runnable imeToggle, TouchpadToggle pad,
+                      Runnable settings) {
             super(c);
             this.winId = winId;
             this.pad = pad;
+            /* Row 0: window controls first, then the modifiers — the keys a
+             * shortcut needs, and the widest labels, which is what the two-row
+             * layout is for. Row 1: everything that is a plain keystroke. */
             if (imeToggle != null)
-                keys.add(new Key("⌨", imeToggle));
+                keys.add(new Key("⌨", imeToggle, 0));
             if (pad != null) {
                 /* a window control, not a keystroke: nothing is sent until the
                  * pointer events the pad produces are */
-                padKey = new Key("Pad", () -> { pad.toggle(); syncPadKey(); });
+                padKey = new Key("Pad", () -> { pad.toggle(); syncPadKey(); }, 0);
                 padKey.on = pad.isOn();
                 keys.add(padKey);
             }
-            keys.add(new Key("Esc", KEY_ESC, false));
-            keys.add(new Key("Tab", KEY_TAB, false));
-            keys.add(new Key("Ctrl", KEY_LEFTCTRL, true));
-            keys.add(new Key("Alt", KEY_LEFTALT, true));
-            keys.add(new Key("Shift", KEY_LEFTSHIFT, true));
-            keys.add(new Key("Super", KEY_LEFTMETA, true));
-            keys.add(new Key("←", KEY_LEFT, false));
-            keys.add(new Key("↑", KEY_UP, false));
-            keys.add(new Key("↓", KEY_DOWN, false));
-            keys.add(new Key("→", KEY_RIGHT, false));
-            keys.add(new Key("Enter", KEY_ENTER, false));
-            keys.add(new Key("⌫", KEY_BACKSPACE, false));
+            if (settings != null)
+                keys.add(new Key("⚙", settings, 0));
+            keys.add(new Key("Ctrl", KEY_LEFTCTRL, true, 0));
+            keys.add(new Key("Alt", KEY_LEFTALT, true, 0));
+            keys.add(new Key("Shift", KEY_LEFTSHIFT, true, 0));
+            keys.add(new Key("Super", KEY_LEFTMETA, true, 0));
+            keys.add(new Key("Esc", KEY_ESC, false, 1));
+            keys.add(new Key("Tab", KEY_TAB, false, 1));
+            keys.add(new Key("←", KEY_LEFT, false, 1));
+            keys.add(new Key("↑", KEY_UP, false, 1));
+            keys.add(new Key("↓", KEY_DOWN, false, 1));
+            keys.add(new Key("→", KEY_RIGHT, false, 1));
+            keys.add(new Key("Enter", KEY_ENTER, false, 1));
+            keys.add(new Key("⌫", KEY_BACKSPACE, false, 1));
             bg.setColor(0xE0202020);
             fg.setColor(Color.WHITE);
             fg.setTextAlign(Paint.Align.CENTER);
@@ -211,16 +241,27 @@ public final class WireInput {
         }
 
         @Override protected void onMeasure(int wSpec, int hSpec) {
-            int h = (int) dp(38);
-            setMeasuredDimension(resolveSize(getSuggestedMinimumWidth(), wSpec), h);
+            setMeasuredDimension(resolveSize(getSuggestedMinimumWidth(), wSpec),
+                                 heightPx(getContext()));
         }
 
         @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
-            float pad = dp(3), gap = dp(3);
-            float kw = (w - pad * 2 - gap * (keys.size() - 1)) / keys.size();
-            for (int i = 0; i < keys.size(); i++) {
-                float x = pad + i * (kw + gap);
-                keys.get(i).rect.set(x, pad, x + kw, h - pad);
+            float pad = dp(ROW_PAD), gap = dp(ROW_PAD);
+            float rowH = (h - pad * (ROWS + 1)) / ROWS;
+            for (int r = 0; r < ROWS; r++) {
+                int n = 0;
+                for (Key k : keys) if (k.row == r) n++;
+                if (n == 0) continue;
+                /* per row: a row with fewer keys gets wider ones */
+                float kw = (w - pad * 2 - gap * (n - 1)) / n;
+                int i = 0;
+                for (Key k : keys) {
+                    if (k.row != r) continue;
+                    float x = pad + i * (kw + gap);
+                    float y = pad + r * (rowH + pad);
+                    k.rect.set(x, y, x + kw, y + rowH);
+                    i++;
+                }
             }
         }
 

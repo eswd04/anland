@@ -538,7 +538,7 @@ public class AwlWindowActivity extends Activity {
          * before (touch goes straight to the client). */
         android.content.SharedPreferences prefs =
                 getSharedPreferences("awl", MODE_PRIVATE);
-        final int barH = Math.round(38 * getResources().getDisplayMetrics().density);
+        final int barH = WireInput.KeyBar.heightPx(this);   /* one source: the bar measures itself */
         /* The band reserved out of the surface on the window's LONG axis
          * (applyEdgeInsets): top and bottom in portrait, left and right in
          * landscape. Its width is the status bar height — the band the system
@@ -551,7 +551,8 @@ public class AwlWindowActivity extends Activity {
         final boolean wantPad = prefs.getInt("touchpad", 0) != 0;
         touchpadMode = wantPad;   /* before the bar is built: it draws this */
         if (wantBar) {
-            keyBar = new WireInput.KeyBar(this, () -> id, this::toggleIme, padToggle);
+            keyBar = new WireInput.KeyBar(this, () -> id, this::toggleIme, padToggle,
+                    this::openSettings);
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT, barH);
             lp.gravity = android.view.Gravity.BOTTOM;
@@ -839,6 +840,27 @@ public class AwlWindowActivity extends Activity {
                     + " (panel now " + (d != null ? d.getRefreshRate() : 0f) + " Hz)");
         } catch (Throwable t) {
             Log.w(TAG, "setFrameRate failed", t);   /* cosmetic: never fatal */
+        }
+    }
+
+    /* The host app's settings screen, opened by the key bar's ⚙ key. libawl is
+     *  an AAR and cannot reference app classes (it references none today), so the
+     *  screen is resolved by name at runtime: a host that ships no such activity
+     *  — a third-party app embedding the library — gets a key that logs instead
+     *  of a crash or a build that will not link. */
+    private static final String SETTINGS_ACTIVITY = "com.anlandnext.WlSettingsActivity";
+
+    /** Open the settings screen (the key bar's ⚙ key). The window goes to the
+     *  background while it is up, which is how the other settings already
+     *  behave: the switches are read when a window is built or resumed. */
+    private void openSettings() {
+        try {
+            android.content.Intent i = new android.content.Intent();
+            i.setClassName(getPackageName(), SETTINGS_ACTIVITY);
+            startActivity(i);
+            Log.i(TAG, "win " + id + " → settings");
+        } catch (Throwable t) {
+            Log.w(TAG, "win " + id + ": this host has no " + SETTINGS_ACTIVITY, t);
         }
     }
 

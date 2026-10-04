@@ -46,7 +46,7 @@
     <string name="section_onscreen">屏幕输入</string>
     <string name="touchpad_tip">触控板（把窗口当作笔记本触控板：单指移动指针，轻点即左键，长按后拖动即拖拽，双指滚动，双指轻点为右键。窗口打开时可用快捷键栏上的「Pad」键在触控板与直接触摸之间切换；此处决定窗口打开时的模式）:</string>
     <string name="touchpad">屏幕触控板</string>
-    <string name="kbd_bar_tip">快捷键栏（Esc、Tab、Ctrl、Alt、Shift、Super、方向键、Enter、退格。Ctrl/Alt/Shift/Super 为锁定式：点一下按住，再点一下松开。对之后打开的窗口生效）:</string>
+    <string name="kbd_bar_tip">快捷键栏，两排（Ctrl、Alt、Shift、Super 为锁定式：点一下按住，再点一下松开；另有 Esc、Tab、方向键、Enter、退格）。⌨ 键拉起输入法，Pad 键在触控板与直接触摸之间切换，齿轮键打开设置界面。对之后打开的窗口生效）:</string>
     <string name="kbd_bar">快捷键栏</string>
     <string name="edge_inset_tip">边缘留白（在窗口长边方向留出状态栏高度的空白——竖屏在上下，横屏在左右——避免客户端的工具栏与屏幕圆角重叠。对之后打开的窗口生效）：</string>
     <string name="edge_inset">边缘留白</string>

@@ -181,8 +181,10 @@ the rest are APK-local.
   tap right-clicks. The key bar's **Pad** key switches between this and direct
   touch while the window is open (it is highlighted while the pad is active); the
   setting is the mode a window opens in.
-- **Shortcut key bar** — Esc, Tab, Ctrl, Alt, Shift, Super, arrows, Enter,
-  Backspace. The modifiers latch: tap to hold, tap again to release.
+- **Shortcut key bar** — two rows. Row one holds the window controls (the
+  keyboard toggle, the **Pad** switch, the gear that opens this settings screen)
+  and the modifiers Ctrl, Alt, Shift, Super; row two holds Esc, Tab, the arrows,
+  Enter and Backspace. The modifiers latch: tap to hold, tap again to release.
 - **IME display mode** — *inset* shrinks the surface so the client reflows above
   the keyboard; *overlay* lets the keyboard float over the content.
 - **Renderer** *(daemon)* — `sc_enabled`: the SurfaceControl backend (zero-copy,
