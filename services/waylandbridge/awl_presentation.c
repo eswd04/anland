@@ -53,8 +53,10 @@ static void pres_fb_res_destroy(struct wl_resource* res) {
     free(p);
 }
 
+/* wp_presentation.feedback(surface, callback): the surface comes first, the
+ * new feedback id second — the order presentation-time.xml declares. */
 static void pres_feedback(struct wl_client* client, struct wl_resource* res,
-                          uint32_t id, struct wl_resource* surface_res) {
+                          struct wl_resource* surface_res, uint32_t id) {
     struct wl_resource* fb = wl_resource_create(
             client, &wp_presentation_feedback_interface,
             wl_resource_get_version(res), id);
