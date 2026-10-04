@@ -187,6 +187,40 @@ void awl_view_map(int mode, double pw, double ph, double cw, double ch,
     *oy = round((ph - ch * *sy) * 0.5);
 }
 
+/* Where the canvas lives, in logical px: the size from include/awl.h, or 0
+ * when the client is laid out from the window. Any thread (atomics). */
+void awl_display_canvas(int32_t* w, int32_t* h) {
+    *w = atomic_load(&g_srv.canvas_w);
+    *h = atomic_load(&g_srv.canvas_h);
+}
+
+void awl_display_set_canvas(int32_t w, int32_t h) {
+    /* -1 = follow the window / zoom, -2 = follow the window exactly, 0 = off
+     * (see include/awl.h); anything outside the range is clamped */
+    if (w < -2) w = -2;
+    if (h < -2) h = -2;
+    if (w > 7680) w = 7680;
+    if (h > 4320) h = 4320;
+    /* The binder config channel carries one key per call, so the two axes
+     * arrive separately: store whatever comes and let the canvas become
+     * active once both are set (every consumer tests both). */
+    atomic_store(&g_srv.canvas_w, w);
+    atomic_store(&g_srv.canvas_h, h);
+    /* live windows keep the canvas they were configured with unless they are
+     * asked again — a canvas change is meant to be visible immediately */
+    if (w > 0 && h > 0)
+        LOGI("canvas → %dx%d (clients are laid out for it)", w, h);
+    else if (w > 0 || h > 0)
+        LOGI("canvas → %dx%d pending (needs both axes; inactive)", w, h);
+    else if (w == -2 || h == -2)
+        LOGI("canvas → follow window exactly (1:1, no zoom, no clipping)");
+    else if (w < 0 || h < 0)
+        LOGI("canvas → follow window / zoom (zoom works; wide windows clip)");
+    else
+        LOGI("canvas → off (window-derived)");
+    awl_windows_reconfigure_all();
+}
+
 /* Per-root decision (regime 1 vs 2) — see the section comment. "Follows the
  * configure" = the committed content base (geometry rectangle, else surface
  * logical size) equals the last configure sent (conf_w/h); an X window has
@@ -196,7 +230,20 @@ void awl_surface_view_map(struct awl_surface* root,
                           double* sx, double* sy, double* ox, double* oy) {
     float cw = 0, ch = 0;
     awl_surface_content_size(root, &cw, &ch);
-    if (root->role == AWL_ROLE_TOPLEVEL && root->u.xdg.conf_w > 0 && root->u.xdg.conf_h > 0 &&
+    /* Regime 1 (s = Z exactly, buffer px landing 1:1 on view px) only holds
+     * while the canvas IS the window at that zoom. With a fixed canvas the
+     * window no longer matches the configure, so the scale_mode placement below
+     * is the correct mapping — FIT gives a uniform, centred, letterboxed canvas
+     * with nothing cropped. */
+    int32_t canvas_w = 0, canvas_h = 0;
+    awl_display_canvas(&canvas_w, &canvas_h);
+    /* -1 (follow) counts as a canvas: FIT then computes k = 1 exactly, which
+     * is the 1:1 mapping we want, and it keeps the client from being sized by
+     * zoom. */
+    const int canvas_active = (canvas_w != 0 || canvas_h != 0);
+    /* -2 included: the canvas is the window, so FIT resolves to exactly 1:1 */
+    if (!canvas_active &&
+        root->role == AWL_ROLE_TOPLEVEL && root->u.xdg.conf_w > 0 && root->u.xdg.conf_h > 0 &&
         (int32_t)lroundf(cw) == root->u.xdg.conf_w &&
         (int32_t)lroundf(ch) == root->u.xdg.conf_h) {
         *sx = *sy = awl_zoom_scale();
@@ -350,7 +397,24 @@ struct awl_frac_scale {
 };
 
 static uint32_t zoom_preferred_scale(void) {
-    /* kwin: round(z × 120); integer zoom_pct avoids float drift */
+    /* The client allocates buffer = configure_size x preferred_scale.
+     *
+     * Follow the window (canvas < 0): the canvas is window/zoom, so the zoom is
+     * what brings the buffer back up to the window's own resolution
+     * (window/zoom x zoom = window). Advertising it is what makes the frame 1:1
+     * - pinning 1.0 made the client render at window/zoom and the presentation
+     * layer upscale it, which is the reported blur.
+     *
+     * Fixed canvas (> 0): the canvas does not depend on zoom, so advertising the
+     * zoom would only multiply the buffer (3x at 175% on a 1920x1080 canvas)
+     * while the picture stays identical - the content is normalised into the
+     * window either way. Stay neutral so the buffer matches the canvas.
+     * Downscaling to the window is not what blurs; upscaling is. */
+    int32_t cw = 0, ch = 0;
+    awl_display_canvas(&cw, &ch);
+    if (cw > 0 || ch > 0 || cw == -2)
+        return 120;   /* fixed canvas, or canvas == window: buffer == canvas */
+    /* kwin: round(z * 120); integer zoom_pct avoids float drift */
     return (uint32_t)((g_srv.zoom_pct * 120 + 50) / 100);
 }
 
@@ -473,6 +537,23 @@ void awl_display_set_zoom(int pct) {
     g_srv.zoom_pct = pct;
     LOGI("zoom → %d%% (preferred_scale=%u, effective Z=%.4f)", pct,
          zoom_preferred_scale(), awl_zoom_scale());
+
+    /* With a fixed canvas, zoom cannot change how big anything looks: the
+     * presentation layer normalises the canvas into the window (FIT), so an
+     * element's on-screen size is logical_size x window/canvas — independent
+     * of the client scale. Making the client re-apply the scale would only
+     * inflate its render buffer (measured: 1920x1080 -> 3360x1890 at zoom
+     * 175, 3x the pixels) for no visible change. preferred_scale is still
+     * broadcast above, so a client that wants to render denser can; the
+     * desktop's apparent size is canvas_w/canvas_h. */
+    int32_t cw = 0, ch = 0;
+    awl_display_canvas(&cw, &ch);
+    if (cw > 0 && ch > 0) {
+        LOGI("zoom: fixed canvas %dx%d — apparent size is set by the canvas, "
+             "not by zoom (no re-configure)", cw, ch);
+        awl_input_constr_remap(0);
+        return;
+    }
 
     /* Broadcast preferred_scale (kwin: resend on change; sending under rwl.rd is safe) */
     pthread_rwlock_rdlock(&g_srv.rwl);

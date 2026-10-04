@@ -319,6 +319,14 @@ static const struct zwp_text_input_v3_interface ti3_iface = {
     .commit = ti3_commit,
 };
 
+/* client pid, for the "who owns this text_input" question */
+static pid_t ime_client_pid(struct wl_client* c) {
+    pid_t pid = 0;
+    uid_t uid = 0; gid_t gid = 0;
+    wl_client_get_credentials(c, &pid, &uid, &gid);
+    return pid;
+}
+
 static void mgr3_get_text_input(struct wl_client* c, struct wl_resource* res,
                                 uint32_t id, struct wl_resource* seat) {
     struct wl_resource* t = wl_resource_create(
@@ -641,9 +649,12 @@ void awl_ime_text(uint64_t id, uint32_t op, const char* text, int32_t a, int32_t
     }
     struct wl_client* c = wl_resource_get_client(s->resource);
     struct awl_ime_obj* o;
+    int seen = 0, ready = 0;
     wl_list_for_each(o, &g_ime, link) {
         if (wl_resource_get_client(o->res) != c) continue;
+        seen++;
         if (!o->enabled || !o->entered) continue;
+        ready++;
         struct awl_surface* ts = obj_surface(o);
         if (!ts) ts = s;
         pthread_mutex_lock(&ts->ev_lock);
@@ -700,6 +711,10 @@ void awl_ime_text(uint64_t id, uint32_t op, const char* text, int32_t a, int32_t
         wl_client_flush(c);
         pthread_mutex_unlock(&ts->ev_lock);
     }
+    if (!ready)
+        LOGI("ime text dropped: window %llu op=%u — its client (pid %d) has %d "
+             "text_input object(s), %d usable (enabled+entered)",
+             (unsigned long long)id, op, ime_client_pid(c), seen, ready);
     pthread_rwlock_unlock(&g_srv.rwl);
 }
 

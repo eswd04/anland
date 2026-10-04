@@ -513,6 +513,10 @@ struct awl_server {
      * thread, read on client dispatch threads — atomics, no lock. Applies to
      * NEW windows only; mapped windows are resized by awl_window_resize. */
     atomic_int init_conf_w, init_conf_h;
+
+    /* Fixed client canvas (daemon config canvas_w/canvas_h; 0 = off) — see
+     * include/awl.h. Binder thread writes, dispatch/render threads read. */
+    atomic_int canvas_w, canvas_h;
     struct wl_list frac_scales;      /* struct awl_frac_scale::link (awl_viewport.c) */
 
     struct wl_list surfaces;   /* struct awl_surface::link */
@@ -726,6 +730,14 @@ void awl_surface_logical_size(struct awl_surface* s, float* w, float* h);
  * carries shadow margins around it), else the surface logical size. Shared
  * by the view mapping, render dst and input inverse. */
 void awl_surface_content_size(struct awl_surface* s, float* w, float* h);
+
+/* Force one configure for a toplevel with its current logical size, and for
+ * every mapped toplevel. Needed because the client scale is applied in the
+ * client's configure handler: a scale change that leaves the size alone still
+ * has to deliver a configure, and a canvas change has to reach live windows.
+ * Any thread; takes rwl.rd itself. */
+void awl_window_reconfigure(uint64_t id);
+void awl_windows_reconfigure_all(void);
 /* Root → window view mapping, view = (logical − geometry origin) × s + o —
  * THE conversion shared by render dst / input inverse / relative deltas /
  * confine rects / IME cursor rect. Content following the

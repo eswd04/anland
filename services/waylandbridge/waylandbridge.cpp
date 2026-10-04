@@ -82,6 +82,17 @@ static std::atomic<bool> g_cfg_xwayland_scale{true};
  * wl_display_get_serial. Read on every configure (hot path), so it is an
  * atomic like g_cfg_sc; a flip takes effect on the next configure. */
 static std::atomic<bool> g_cfg_next_serial{true};
+/* Fixed client canvas (daemon config canvas_w/canvas_h; 0 = off). Applied at
+ * startup and over binder; affects windows configured from then on. */
+static int g_cfg_canvas_w = 0;
+static int g_cfg_canvas_h = 0;
+/* Announced output refresh in Hz; 0 = use the detected panel rate. */
+static int g_cfg_refresh_hz = 0;
+
+/* Re-sample the panel rate on window attach; defined next to detect_refresh_hz
+ * (it needs <thread>, which is included much further down), called from the
+ * binder attach path. */
+static void refresh_recheck(void);
 
 extern "C" bool awl_cfg_next_serial(void) {
     return g_cfg_next_serial.load(std::memory_order_relaxed);
@@ -1220,6 +1231,9 @@ static bool cfg_domain(const std::string& key, int* lo, int* hi) {
     if (key == "auto_attach") { *lo = 0; *hi = 1; return true; }
     if (key == "sc_enabled") { *lo = 0; *hi = 1; return true; }
     if (key == "next_serial") { *lo = 0; *hi = 1; return true; }
+    if (key == "canvas_w") { *lo = -2; *hi = 7680; return true; }
+    if (key == "canvas_h") { *lo = -2; *hi = 4320; return true; }
+    if (key == "refresh_hz") { *lo = 0; *hi = 480; return true; }
     return false;
 }
 
@@ -1232,6 +1246,16 @@ static int cfg_parse_int(const char* buf, const char* key) {
     p = strchr(p + strlen(pat) - 1, ':');
     if (!p) return -1;
     return atoi(p + 1);
+}
+
+/* Is the key present at all? cfg_parse_int signals a missing key with -1,
+ * which is a MEANINGFUL value for canvas_w/canvas_h (-1 = follow the window /
+ * zoom) — those two would otherwise turn their mode on by default, i.e. on
+ * every config.json that predates them. Only those two have to ask. */
+static bool cfg_has_key(const char* buf, const char* key) {
+    char pat[32];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    return strstr(buf, pat) != nullptr;
 }
 
 /* same, string value: contents of the first quoted token after the colon
@@ -1282,11 +1306,14 @@ static void cfg_save_locked(void) {
                "  \"scale_mode\": %d,\n  \"xwayland_scale\": %d,\n"
                "  \"auto_attach\": %d,\n  \"sc_enabled\": %d,\n"
                "  \"next_serial\": %d,\n"
+               "  \"canvas_w\": %d,\n  \"canvas_h\": %d,\n"
+               "  \"refresh_hz\": %d,\n"
                "  \"runtime_dir\": \"%s\",\n  \"socket_listen\": %d\n}\n",
             g_cfg_zoom, g_cfg_init_w, g_cfg_init_h, g_cfg_scale_mode,
             g_cfg_xwayland_scale.load(std::memory_order_relaxed) ? 1 : 0,
             g_cfg_auto_attach ? 1 : 0, g_cfg_sc.load(std::memory_order_relaxed) ? 1 : 0,
             g_cfg_next_serial.load(std::memory_order_relaxed) ? 1 : 0,
+            g_cfg_canvas_w, g_cfg_canvas_h, g_cfg_refresh_hz,
             rt, sl);
     if (fclose(f) != 0)
         LOGE("config save flush: %s", strerror(errno));
@@ -1318,7 +1345,7 @@ static void cfg_load_sock_cfg(void) {
     if (sl == 0) {
         g_sock_listen = false;
         LOGI("config: socket_listen=0 — pure binder-fd mode (no wayland-0 socket)");
-    } else if (sl != -1) {
+    } else if (sl != 1 && sl != -1) {
         LOGE("config: socket_listen=%d invalid (0 or 1), ignored", sl);
     }
 }
@@ -1390,6 +1417,30 @@ static void cfg_load_and_apply(void) {
              sc ? "true (SC/HWC backend)" : "false (GL fallback)");
     } else if (sc != -1) {
         LOGE("config: sc_enabled=%d out of range (0..1), ignored", sc);
+    }
+    /* presence first: -1 means "absent" to cfg_parse_int and is also a valid
+     * canvas value (see cfg_has_key) */
+    if (cfg_has_key(buf, "canvas_w")) {
+        int cwid = cfg_parse_int(buf, "canvas_w");
+        if (cwid >= -2 && cwid <= 7680) g_cfg_canvas_w = cwid;
+        else LOGE("config: canvas_w=%d out of range (-2..7680), ignored", cwid);
+    }
+    if (cfg_has_key(buf, "canvas_h")) {
+        int chgt = cfg_parse_int(buf, "canvas_h");
+        if (chgt >= -2 && chgt <= 4320) g_cfg_canvas_h = chgt;
+        else LOGE("config: canvas_h=%d out of range (-2..4320), ignored", chgt);
+    }
+    awl_display_set_canvas(g_cfg_canvas_w, g_cfg_canvas_h);
+    if (g_cfg_canvas_w > 0 && g_cfg_canvas_h > 0)
+        LOGI("config: canvas %dx%d — clients are laid out for it, the "
+             "presentation layer fits it into the window (scale_mode)",
+             g_cfg_canvas_w, g_cfg_canvas_h);
+    int rhz = cfg_parse_int(buf, "refresh_hz");
+    if (rhz >= 0 && rhz <= 480) g_cfg_refresh_hz = rhz;
+    if (g_cfg_refresh_hz > 0) {
+        awl_output_set_refresh(g_cfg_refresh_hz);
+        LOGI("config: refresh_hz=%d (overrides the detected panel rate)",
+             g_cfg_refresh_hz);
     }
     int ns = cfg_parse_int(buf, "next_serial");
     if (ns == 0 || ns == 1) {
@@ -1466,6 +1517,28 @@ static int cfg_set(const std::string& key, int32_t val) {
             cfg_save_locked();
         }
         LOGI("config set sc_enabled=%d (new attaches + persisted)", val);
+    } else if (key == "canvas_w" || key == "canvas_h") {
+        /* affects windows configured from now on; a live window keeps the
+         * canvas it was configured with until it is re-configured */
+        /* one key per call: the canvas becomes active once both axes are set */
+        int nw = g_cfg_canvas_w, nh = g_cfg_canvas_h;
+        if (key == "canvas_w") nw = val; else nh = val;
+        g_cfg_canvas_w = nw;
+        g_cfg_canvas_h = nh;
+        awl_display_set_canvas(nw, nh);
+        {
+            std::lock_guard<std::mutex> lk(g_cfg_lock);
+            cfg_save_locked();
+        }
+        LOGI("config set canvas=%dx%d (applied + persisted)", nw, nh);
+    } else if (key == "refresh_hz") {
+        g_cfg_refresh_hz = val;
+        if (val > 0) awl_output_set_refresh(val);
+        {
+            std::lock_guard<std::mutex> lk(g_cfg_lock);
+            cfg_save_locked();
+        }
+        LOGI("config set refresh_hz=%d (applied + persisted)", val);
     } else if (key == "next_serial") {
         /* effective on the next configure sent — nothing live to apply */
         g_cfg_next_serial.store(val != 0, std::memory_order_relaxed);
@@ -1762,6 +1835,7 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         ime_reopen_on_attach(id);            /* input state kept alive: enabled during detach → reopen */
         capture_reopen_on_attach(id);        /* constraint still active (persistent) → re-capture */
         keep_on_reopen_on_attach(id);        /* idle inhibitor alive → re-set FLAG_KEEP_SCREEN_ON */
+        refresh_recheck();                    /* attach: the app just asked the display for a real rate */
         awl_output_grow((uint32_t)w, (uint32_t)h);   /* X screen must cover the X window before it is resized to us */
         awl_window_resize(id, w, h);         /* Android fully owns sizing (initial + subsequent) */
         xwm_resize_window(id, w, h);         /* Xwayland window: sync initial size to the X side */
@@ -2068,6 +2142,9 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         else if (key == "sc_enabled") v = g_cfg_sc.load(std::memory_order_relaxed) ? 1 : 0;
         else if (key == "next_serial")
             v = g_cfg_next_serial.load(std::memory_order_relaxed) ? 1 : 0;
+        else if (key == "canvas_w") v = g_cfg_canvas_w;
+        else if (key == "canvas_h") v = g_cfg_canvas_h;
+        else if (key == "refresh_hz") v = g_cfg_refresh_hz;
         else LOGE("config get: unknown key '%s'", key.c_str());
         AParcel_writeInt32(out, v);
         return STATUS_OK;
@@ -2088,6 +2165,82 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
 
 /* ---------------- display info (no Java API, parsed via exec) ---------------- */
 
+/* The rate the daemon announces, and the rate AwlWindowActivity asks the
+ * display for — the two must name the same number or the desktop paces for one
+ * rate while the panel runs at another. 120 is this panel's own default out of
+ * 60/90/120/144/165; a config refresh_hz overrides it outright. */
+#define AWL_REFRESH_CAP 120
+
+/* Announced panel refresh, in Hz, or 0 when it cannot be determined.
+ *
+ * Deliberately NOT the currently-active display mode. Android switches the mode
+ * per focused window (measured: this panel drops from 120 to 60 Hz as soon as a
+ * background app takes focus), so "what is it running right now" gives a
+ * different answer at every sampling moment — that is how the desktop came to
+ * announce 90 Hz while the panel was at 120. What we want is the best rate the
+ * panel offers at this resolution, which does not drift.
+ *
+ * Source: SurfaceFlinger's config table — the only place a mode id maps to a
+ * rate, and its rows are short enough to read line by line (dumpsys display's
+ * supportedModes line runs to several KB):
+ *   refresh info: HwcConfigIndex:0 name:120.00 Hz fps:120.000008 ... WxH=1272x2772
+ */
+static int detect_refresh_hz(void) {
+    uint32_t dw = 0, dh = 0;
+    FILE* p = popen("/system/bin/wm size 2>/dev/null", "r");
+    if (p) {
+        char buf[256];
+        while (fgets(buf, sizeof(buf), p)) {
+            unsigned w, h;
+            if (sscanf(buf, " Override size: %ux%u", &w, &h) == 2) { dw = w; dh = h; }
+            else if (!dw && sscanf(buf, " Physical size: %ux%u", &w, &h) == 2) { dw = w; dh = h; }
+        }
+        pclose(p);
+    }
+    int best_match = 0, best_any = 0;
+    p = popen("/system/bin/dumpsys SurfaceFlinger 2>/dev/null", "r");
+    if (p) {
+        char buf[512];
+        while (fgets(buf, sizeof(buf), p)) {
+            const char* f = strstr(buf, "fps:");
+            const char* wh = strstr(buf, "WxH=");
+            if (!f || !wh) continue;
+            double hz = atof(f + 4);
+            unsigned w = 0, h = 0;
+            if (sscanf(wh + 4, "%ux%u", &w, &h) != 2) continue;
+            int r = (int)(hz + 0.5);
+            if (r < 1 || r > 480 || r > AWL_REFRESH_CAP) continue;
+            if (r > best_any) best_any = r;
+            if (dw && w == dw && h == dh && r > best_match) best_match = r;
+        }
+        pclose(p);
+    }
+    return best_match > 0 ? best_match : best_any;
+}
+
+/* ---- panel refresh, re-sampled -------------------------------------------
+ * The panel rate is not fixed for the daemon's lifetime: a different window
+ * size means a different set of offered modes, and AwlWindowActivity asks the
+ * display for a rate on every attach. Re-sample then and re-announce; a pinned
+ * config refresh_hz wins and is never overridden. Runs off the binder thread —
+ * dumpsys takes ~0.2 s and attach is a call the app is waiting on. */
+static void refresh_recheck(void) {
+    if (g_cfg_refresh_hz > 0) return;            /* pinned by config */
+    static std::atomic<bool> inflight(false);
+    static std::atomic<int64_t> last_ms(0);
+    int64_t now = (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now - last_ms.load() < 2000) return;
+    if (inflight.exchange(true)) return;
+    last_ms.store(now);
+    std::thread([] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        int hz = detect_refresh_hz();
+        if (hz > 0) awl_output_set_refresh(hz);
+        inflight.store(false);
+    }).detach();
+}
+
 static bool query_display(awl_display_info_t* info) {
     memset(info, 0, sizeof(*info));
     info->width = 1280; info->height = 720; info->refresh_hz = 60; info->dpi = 420;
@@ -2107,7 +2260,13 @@ static bool query_display(awl_display_info_t* info) {
     __system_property_get("ro.sf.lcd_density", prop);
     if (prop[0]) info->dpi = atoi(prop);
     info->scale = 1;
-    LOGI("display %ux%u dpi=%d", info->width, info->height, info->dpi);
+    {
+        int hz = detect_refresh_hz();
+        if (hz > 0) info->refresh_hz = hz;
+        LOGI("display %ux%u dpi=%d refresh=%dHz (%s)",
+             info->width, info->height, info->dpi, info->refresh_hz,
+             hz > 0 ? "detected" : "detection failed, assuming 60");
+    }
     return true;
 }
 

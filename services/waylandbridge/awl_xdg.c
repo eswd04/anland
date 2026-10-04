@@ -16,6 +16,12 @@
 
 #define AWL_XDG_VERSION 3
 
+/* Logical canvas for a toplevel at a given window size: a fixed canvas
+ * (daemon config canvas_w/canvas_h) wins, else the window/zoom mapping.
+ * Defined with the xdg machinery below, but used by the early config
+ * emitters, hence the forward declaration. */
+static void window_logical(int32_t pw, int32_t ph, int32_t* lw, int32_t* lh);
+
 /* Configure serial policy (daemon config "next_serial", default on).
  * xdg_surface.configure carries a serial the client acks; a client that
  * validates it drops the event without acking, so its first buffer is never
@@ -143,7 +149,9 @@ static void toplevel_set_maximized(struct wl_client* c, struct wl_resource* res)
      * scenarios). The real size is only sent by awl_window_resize triggered by
      * Activity SURFACE changes. */
     uint32_t states[] = { XDG_TOPLEVEL_STATE_MAXIMIZED };
-    send_toplevel_configure(s, g_srv.init_conf_w, g_srv.init_conf_h, states, 1);
+    int32_t iw = 0, ih = 0;
+    window_logical(g_srv.init_conf_w, g_srv.init_conf_h, &iw, &ih);
+    send_toplevel_configure(s, iw, ih, states, 1);
 }
 static void toplevel_unset_maximized(struct wl_client* c, struct wl_resource* res) {
     struct awl_surface* s = wl_resource_get_user_data(res);
@@ -155,7 +163,9 @@ static void toplevel_set_fullscreen(struct wl_client* c, struct wl_resource* res
     if (!s) return;
     /* Same as set_maximized: config placeholder, real size comes from SURFACE-triggered resize */
     uint32_t states[] = { XDG_TOPLEVEL_STATE_FULLSCREEN };
-    send_toplevel_configure(s, g_srv.init_conf_w, g_srv.init_conf_h, states, 1);
+    int32_t iw = 0, ih = 0;
+    window_logical(g_srv.init_conf_w, g_srv.init_conf_h, &iw, &ih);
+    send_toplevel_configure(s, iw, ih, states, 1);
 }
 static void toplevel_unset_fullscreen(struct wl_client* c, struct wl_resource* res) {
     struct awl_surface* s = wl_resource_get_user_data(res);
@@ -505,7 +515,9 @@ static void xdg_surface_get_toplevel(struct wl_client* c,
      * the Activity is unrelated to the physical screen size, physical values
      * would be wrong). Once the Activity surface is ready, surfaceChanged →
      * awl_window_resize forces a configure with the exact window size. */
-    send_configure_locked(s, g_srv.init_conf_w, g_srv.init_conf_h, NULL, 0);
+    int32_t iw = 0, ih = 0;
+    window_logical(g_srv.init_conf_w, g_srv.init_conf_h, &iw, &ih);
+    send_configure_locked(s, iw, ih, NULL, 0);
     pthread_mutex_unlock(&s->ev_lock);
 }
 
@@ -726,6 +738,87 @@ static int32_t phys_to_logical(int32_t v) {
     return (int32_t)(((int64_t)v * 120 + pref / 2) / pref);
 }
 
+/* Logical canvas for a toplevel at the given window size. A fixed canvas wins:
+ * the client is laid out for the canvas size however big the Android window is,
+ * and the presentation layer fits that canvas into the window — so the canvas
+ * is no longer derived from the window and cannot be clipped by zoom. Without a
+ * canvas: the historical window/zoom mapping. */
+static void window_logical(int32_t pw, int32_t ph, int32_t* lw, int32_t* lh) {
+    int32_t cw = 0, ch = 0;
+    awl_display_canvas(&cw, &ch);
+    if (cw == -2 || ch == -2) {
+        /* canvas = the window exactly: buffer == panel pixels, so the frame is
+         * 1:1 and nothing can be clipped. Zoom deliberately has no effect
+         * (see the note in include/awl.h). */
+        *lw = pw > 0 ? pw : 1;
+        *lh = ph > 0 ? ph : 1;
+        return;
+    }
+    if (cw < 0 || ch < 0) {
+        /* follow the window, divided by the effective zoom: the canvas keeps
+         * the window's aspect ratio, so scale_mode FIT resolves to exactly
+         * that zoom — uniform, full-window, no letterbox, nothing cropped.
+         * (canvas = 0 instead lets the canvas shrink with zoom, which makes
+         * the content overflow the window.) It also tracks every resize
+         * (soft keyboard, split screen). */
+        /* Use the zoom PERCENTAGE here, not the advertised preferred_scale:
+         * the latter is deliberately pinned neutral (120) while a canvas is in
+         * effect, so that the client renders exactly the canvas instead of
+         * canvas x zoom (measured: 1920x1080 -> 3360x1890, 3x the pixels). The
+         * canvas division still needs the real zoom, otherwise the factor
+         * cancels out and the canvas never changes. */
+        int32_t zp = atomic_load(&g_srv.zoom_pct);
+        if (zp < 1) zp = 100;
+        int32_t w = (int32_t)(((int64_t)(pw > 0 ? pw : 1) * 100) / zp);
+        int32_t h = (int32_t)(((int64_t)(ph > 0 ? ph : 1) * 100) / zp);
+        *lw = w > 0 ? w : 1;
+        *lh = h > 0 ? h : 1;
+        return;
+    }
+    if (cw > 0 && ch > 0) {
+        *lw = cw;
+        *lh = ch;
+        return;
+    }
+    *lw = phys_to_logical(pw);
+    *lh = phys_to_logical(ph);
+}
+
+/* Send one configure with the window's current logical size, whether or not it
+ * changed. awl_window_resize() suppresses an unchanged size (that guard keeps
+ * needless re-layouts away), so this is the explicit "re-announce" path used
+ * when only the scale or the canvas changed. */
+void awl_window_reconfigure(uint64_t id) {
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    struct awl_surface* s = awl_surface_by_id(id);
+    if (s && s->role == AWL_ROLE_TOPLEVEL) {
+        pthread_mutex_lock(&s->ev_lock);
+        if (s->role == AWL_ROLE_TOPLEVEL && s->u.xdg.role_res && s->mapped) {
+            int32_t lw = 0, lh = 0;
+            window_logical(s->phys_w, s->phys_h, &lw, &lh);
+            LOGD("window %llu reconfigure %dx%d", (unsigned long long)id, lw, lh);
+            send_configure_locked(s, lw, lh, NULL, 0);
+            wl_client_flush(wl_resource_get_client(s->u.xdg.role_res));
+        }
+        pthread_mutex_unlock(&s->ev_lock);
+    }
+    pthread_rwlock_unlock(&g_srv.rwl);
+}
+
+void awl_windows_reconfigure_all(void) {
+    uint64_t ids[64];
+    int n = 0;
+    pthread_rwlock_rdlock(&g_srv.rwl);
+    struct awl_surface* s;
+    wl_list_for_each(s, &g_srv.surfaces, link) {
+        if (s->role == AWL_ROLE_TOPLEVEL && s->mapped && n < 64)
+            ids[n++] = s->id;
+    }
+    pthread_rwlock_unlock(&g_srv.rwl);
+    for (int i = 0; i < n; i++)
+        awl_window_reconfigure(ids[i]);   /* takes rwl.rd itself */
+}
+
 void awl_window_resize(uint64_t id, int32_t w, int32_t h) {
     int hit = 0, changed = 0;
     pthread_rwlock_rdlock(&g_srv.rwl);
@@ -753,8 +846,8 @@ void awl_window_resize(uint64_t id, int32_t w, int32_t h) {
             LOGD("xwayland window %llu phys=%dx%d", (unsigned long long)s->id,
                     w, h);
         } else if (r == AWL_ROLE_TOPLEVEL) {
-            int32_t lw = phys_to_logical(w);
-            int32_t lh = phys_to_logical(h);
+            int32_t lw = 0, lh = 0;
+            window_logical(w, h, &lw, &lh);
             if (!s->u.xdg.role_res || !s->mapped) {
                 /* Window not ready (first buffer not committed / role not built):
                  * cache it; awl_xdg_flush_pending forces the send after map — the
@@ -820,11 +913,12 @@ void awl_xdg_flush_pending(uint64_t id) {
         if (s->role == AWL_ROLE_TOPLEVEL &&
             s->has_pending && s->u.xdg.role_res && s->mapped) {
             s->has_pending = 0;
+            int32_t lw = 0, lh = 0;
+            window_logical(s->u.xdg.pend_w, s->u.xdg.pend_h, &lw, &lh);
             LOGI("surface %llu flush pending configure %dx%d (logical %dx%d)",
                     (unsigned long long)s->id, s->u.xdg.pend_w, s->u.xdg.pend_h,
-                    phys_to_logical(s->u.xdg.pend_w), phys_to_logical(s->u.xdg.pend_h));
-            send_configure_locked(s, phys_to_logical(s->u.xdg.pend_w),
-                                  phys_to_logical(s->u.xdg.pend_h), NULL, 0);
+                    lw, lh);
+            send_configure_locked(s, lw, lh, NULL, 0);
             wl_client_flush(wl_resource_get_client(s->u.xdg.role_res));
         }
         pthread_mutex_unlock(&s->ev_lock);

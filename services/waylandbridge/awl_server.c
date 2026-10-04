@@ -81,6 +81,26 @@ static void output_bind(struct wl_client* client, void* data,
     pthread_rwlock_unlock(&g_srv.rwl);
 }
 
+/* Any thread. Announces a new refresh rate and re-sends the output state to
+ * every bound wl_output (same shape as awl_output_grow). */
+void awl_output_set_refresh(int32_t hz) {
+    if (hz < 1 || hz > 480) return;
+    if (!g_srv.running) return;
+    pthread_rwlock_wrlock(&g_srv.rwl);
+    if (g_srv.info.refresh_hz == hz) {
+        pthread_rwlock_unlock(&g_srv.rwl);
+        return;
+    }
+    g_srv.info.refresh_hz = hz;
+    struct awl_output_res* o;
+    wl_list_for_each(o, &g_outputs, link) {
+        output_send_state(o->res);
+        wl_client_flush(wl_resource_get_client(o->res));
+    }
+    pthread_rwlock_unlock(&g_srv.rwl);
+    LOGI("output refresh → %d Hz (re-announced)", hz);
+}
+
 /* Any thread (binder SURFACE/RESIZE). Grows the output mode to cover w×h
  * (physical px, per-axis max, never shrinks) and re-announces it to every
  * bound wl_output; a no-op when the window already fits. */

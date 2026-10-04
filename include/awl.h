@@ -162,6 +162,11 @@ void awl_window_resize(uint64_t id, int32_t w, int32_t h);   /* xdg configure */
  * screen from the output and clamps pointer/touch to it, so an X toplevel
  * larger than the output had unreachable regions. Any thread. */
 void awl_output_grow(uint32_t w, uint32_t h);
+
+/* Set the announced output refresh rate (Hz) and re-announce it to every
+ * bound wl_output. Clients pace on this, so a wrong value makes them render
+ * at the wrong cadence. Any thread. */
+void awl_output_set_refresh(int32_t hz);
 /* Android window resized → the renderer's cached ANativeWindow size for this
  * window is stale: drop it, the next frame re-queries and renders at the new
  * size (the original full-screen path). Called from awl_window_resize; any
@@ -189,6 +194,45 @@ int awl_window_get_icon(uint64_t id, void** pixels, int32_t* w, int32_t* h);
  * getpid() for its own boost. Any thread, no daemon locks held. */
 void awl_sched_set(pid_t pid, int on);
 void awl_display_set_zoom(int pct);   /* zoom = 100×Z (50..300; dynamic, #31) */
+
+/* Client canvas, in logical px (daemon config canvas_w/canvas_h). It decides how
+ * the client is laid out, independently of the Android window, and the
+ * presentation layer maps that canvas into the window through scale_mode:
+ *
+ *   > 0   fixed canvas: the toplevel is configured with exactly this size
+ *         whatever the window is. FIT maps it into the window uniformly, so
+ *         nothing is cropped; a mismatched aspect gives letterbox bars (the way
+ *         to show a whole 16:9 desktop on a tall phone).
+ *
+ *   -2    follow the window EXACTLY: canvas = window, advertised scale neutral,
+ *         so the client renders one buffer pixel per panel pixel — strictly 1:1,
+ *         never resampled and never clipped. Zoom has no effect in this mode,
+ *         and that is the point: on a fixed panel, magnifying without either
+ *         cropping or blurring is geometrically impossible ("1.5x" can only show
+ *         848 of 1272 pixels). Use this when sharpness and completeness matter
+ *         more than size.
+ *
+ *   -1    follow the window, divided by the zoom:
+ *             canvas = window x 100 / zoom_pct
+ *         The canvas keeps the window's aspect ratio, so FIT resolves to exactly
+ *         that zoom: the desktop fills the window at the requested size with no
+ *         letterbox and nothing cropped. This is the app-side scale control (the
+ *         host app's zoom slider drives it) and it tracks every window change
+ *         (soft keyboard, split screen). Needs scale_mode FIT or STRETCH;
+ *         CENTER shows 1:1 and therefore cannot scale.
+ *
+ *   0     legacy: canvas = window x 120 / preferred_scale. Same canvas as -1
+ *         only when zoom is 100; above that the canvas shrinks BELOW the window,
+ *         so content overflows and is clipped (a desktop shell overflows).
+ *
+ * While any canvas is in effect the advertised preferred_scale is neutral
+ * (1.0): the client must render exactly the canvas rather than canvas x zoom.
+ * The latter inflated the render buffer 3x at zoom 175% with no visible change,
+ * because the presentation layer normalises the canvas into the window anyway.
+ *
+ * Both axes, or neither. */
+void awl_display_set_canvas(int32_t w, int32_t h);
+void awl_display_canvas(int32_t* w, int32_t* h);
 int awl_display_zoom(void);           /* current zoom pct (daemon config reads) */
 double awl_zoom_scale(void);          /* effective quantized Z used by clients */
 
