@@ -178,7 +178,9 @@ the rest are APK-local.
   client reflow.
 - **On-screen touchpad** — use the window as a laptop pad: one finger moves the
   pointer, tap clicks, long-press-then-drag drags, two fingers scroll, two-finger
-  tap right-clicks.
+  tap right-clicks. The key bar's **Pad** key switches between this and direct
+  touch while the window is open (it is highlighted while the pad is active); the
+  setting is the mode a window opens in.
 - **Shortcut key bar** — Esc, Tab, Ctrl, Alt, Shift, Super, arrows, Enter,
   Backspace. The modifiers latch: tap to hold, tap again to release.
 - **IME display mode** — *inset* shrinks the surface so the client reflows above

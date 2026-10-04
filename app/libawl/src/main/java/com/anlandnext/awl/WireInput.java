@@ -44,6 +44,18 @@ public final class WireInput {
      *  capturing a value that is still -1. */
     public interface WinId { long get(); }
 
+    /** The touch / touchpad switch the key bar offers.
+     *
+     *  Deliberately not a Runnable: the key has two states and draws which one
+     *  is active, so the bar has to be able to ask. The window owns the mode
+     *  (it holds the touchpad view and the preference) — the bar only reads
+     *  {@link #isOn} and calls {@link #toggle}. */
+    public interface TouchpadToggle {
+        /** True while the touchpad (rather than direct touch) is active. */
+        boolean isOn();
+        void toggle();
+    }
+
     /* ---- printable ASCII → evdev (US layout) ----
      * A desktop client often has no text_input object, and without one the IME
      * bridge has nowhere to deliver text. Keys always land, so printable ASCII
@@ -130,18 +142,31 @@ public final class WireInput {
         }
 
         private final List<Key> keys = new ArrayList<>();
+        /** The touch/touchpad switch, or null when the window does not offer one. */
+        private final TouchpadToggle pad;
+        private Key padKey;
         private final Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint fg = new Paint(Paint.ANTI_ALIAS_FLAG);
         private int downIndex = -1;
 
         /** @param imeToggle run by the keyboard key — summons/dismisses the
          *  Android IME (the bridge that feeds the text-input protocol). May be
-         *  null when the summon ability is unavailable. */
-        public KeyBar(Context c, WinId winId, Runnable imeToggle) {
+         *  null when the summon ability is unavailable.
+         *  @param pad the touch/touchpad switch, or null for no such key. Its
+         *  key shows the current mode through the usual on/off highlight. */
+        public KeyBar(Context c, WinId winId, Runnable imeToggle, TouchpadToggle pad) {
             super(c);
             this.winId = winId;
+            this.pad = pad;
             if (imeToggle != null)
                 keys.add(new Key("⌨", imeToggle));
+            if (pad != null) {
+                /* a window control, not a keystroke: nothing is sent until the
+                 * pointer events the pad produces are */
+                padKey = new Key("Pad", () -> { pad.toggle(); syncPadKey(); });
+                padKey.on = pad.isOn();
+                keys.add(padKey);
+            }
             keys.add(new Key("Esc", KEY_ESC, false));
             keys.add(new Key("Tab", KEY_TAB, false));
             keys.add(new Key("Ctrl", KEY_LEFTCTRL, true));
@@ -174,6 +199,15 @@ public final class WireInput {
                 }
             }
             postInvalidateOnAnimation();
+        }
+
+        /** Re-read the mode and redraw the key. The switch can also be flipped
+         *  elsewhere (the settings page), and the bar has to show that. */
+        public void syncPadKey() {
+            if (padKey != null && pad != null) {
+                padKey.on = pad.isOn();
+                postInvalidateOnAnimation();
+            }
         }
 
         @Override protected void onMeasure(int wSpec, int hSpec) {

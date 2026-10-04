@@ -112,6 +112,8 @@ public class AwlWindowActivity extends Activity {
     private EditText hiddenInput;
     private WireInput.KeyBar keyBar;            /* on-screen shortcut keys */
     private WireInput.TouchpadView touchpad;    /* screen used as a touchpad */
+    private boolean touchpadMode;               /* pad visible = touchpad input,
+                                                 * gone = touches reach the client */
     private int barInset;                       /* key-bar height, reserved out of the surface */
     private int edgeBand;                       /* reserved band width — see applyEdgeInsets */
     private InputMethodManager imm;
@@ -547,20 +549,24 @@ public class AwlWindowActivity extends Activity {
         edgeBand = preferredEdgeBand();
         final boolean wantBar = prefs.getInt("kbd_bar", 0) != 0;
         final boolean wantPad = prefs.getInt("touchpad", 0) != 0;
+        touchpadMode = wantPad;   /* before the bar is built: it draws this */
         if (wantBar) {
-            keyBar = new WireInput.KeyBar(this, () -> id, this::toggleIme);
+            keyBar = new WireInput.KeyBar(this, () -> id, this::toggleIme, padToggle);
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT, barH);
             lp.gravity = android.view.Gravity.BOTTOM;
             root.addView(keyBar, lp);
         }
-        if (wantPad) {
+        /* Built when either the preference asks for it or the bar is there to
+         * switch it on; visibility is the mode (see setTouchpadMode). */
+        if (wantPad || wantBar) {
             touchpad = new WireInput.TouchpadView(this, () -> id);
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.MATCH_PARENT);
             if (wantBar) lp.bottomMargin = barH;   /* never cover the key bar */
             root.addView(touchpad, lp);
+            touchpad.setVisibility(wantPad ? android.view.View.VISIBLE : android.view.View.GONE);
         }
         if (wantBar) barInset = barH;
         /* Always: the edge band applies with or without the bar. The bar is
@@ -834,6 +840,36 @@ public class AwlWindowActivity extends Activity {
         } catch (Throwable t) {
             Log.w(TAG, "setFrameRate failed", t);   /* cosmetic: never fatal */
         }
+    }
+
+    /** The key bar's touch/touchpad switch (see setTouchpadMode). Field, not a
+     *  lambda at the call site: the bar keeps it for the window's lifetime. */
+    private final WireInput.TouchpadToggle padToggle = new WireInput.TouchpadToggle() {
+        @Override public boolean isOn() { return touchpadMode; }
+        @Override public void toggle() { setTouchpadMode(!touchpadMode); }
+    };
+
+    /** Switch the screen between direct touch and touchpad input.
+     *
+     *  The pad view is built whenever the key bar is present — the bar carries
+     *  this switch, so the pad has to exist to be switched on — which makes the
+     *  mode its visibility: gone lets touches through to the client, visible
+     *  consumes them and drives the pointer. Persisted, so the settings switch
+     *  and this key agree, and a window opened later starts in the chosen mode.
+     *
+     *  Leaving touchpad mode detaches the pointer first: the pad may be mid-drag
+     *  or mid-scroll, and the client would otherwise keep a stale pointer focus
+     *  and a held button that no later event clears. */
+    private void setTouchpadMode(boolean on) {
+        touchpadMode = on;
+        getSharedPreferences("awl", MODE_PRIVATE).edit()
+                .putInt("touchpad", on ? 1 : 0).apply();
+        if (touchpad != null) {
+            if (!on) touchpad.detachPointer();
+            touchpad.setVisibility(on ? android.view.View.VISIBLE : android.view.View.GONE);
+        }
+        if (keyBar != null) keyBar.syncPadKey();
+        Log.i(TAG, "win " + id + " input mode → " + (on ? "touchpad" : "touch"));
     }
 
     private void initHiddenInput() {

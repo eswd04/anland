@@ -44,7 +44,7 @@
     <string name="window_state_detached">已分离</string>
     <string name="config_unsupported">当前守护进程不认识该选项 —— 需要用本源码树重新构建模块才能启用。</string>
     <string name="section_onscreen">屏幕输入</string>
-    <string name="touchpad_tip">触控板（把窗口当作笔记本触控板：单指移动指针，轻点即左键，长按后拖动即拖拽，双指滚动，双指轻点为右键。对之后打开的窗口生效）:</string>
+    <string name="touchpad_tip">触控板（把窗口当作笔记本触控板：单指移动指针，轻点即左键，长按后拖动即拖拽，双指滚动，双指轻点为右键。窗口打开时可用快捷键栏上的「Pad」键在触控板与直接触摸之间切换；此处决定窗口打开时的模式）:</string>
     <string name="touchpad">屏幕触控板</string>
     <string name="kbd_bar_tip">快捷键栏（Esc、Tab、Ctrl、Alt、Shift、Super、方向键、Enter、退格。Ctrl/Alt/Shift/Super 为锁定式：点一下按住，再点一下松开。对之后打开的窗口生效）:</string>
     <string name="kbd_bar">快捷键栏</string>

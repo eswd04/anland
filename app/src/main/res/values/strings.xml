@@ -44,7 +44,7 @@
     <string name="window_state_detached">Detached</string>
     <string name="config_unsupported">This daemon does not know this option — rebuild the module from this source tree to enable it.</string>
     <string name="section_onscreen">On-screen input</string>
-    <string name="touchpad_tip">Touchpad (use the window as a laptop pad: one finger moves the pointer, a tap clicks, long-press then drag drags, two fingers scroll, a two-finger tap right-clicks. Applies to windows opened from now on):</string>
+    <string name="touchpad_tip">Touchpad (use the window as a laptop pad: one finger moves the pointer, a tap clicks, long-press then drag drags, two fingers scroll, a two-finger tap right-clicks. The "Pad" key on the key bar switches between this and direct touch while the window is open; this setting is the mode a window opens in):</string>
     <string name="touchpad">On-screen touchpad</string>
     <string name="kbd_bar_tip">Shortcut key bar (Esc, Tab, Ctrl, Alt, Shift, Super, arrows, Enter, Backspace. Ctrl/Alt/Shift/Super latch: tap to hold, tap again to release. Applies to windows opened from now on):</string>
     <string name="kbd_bar">Shortcut key bar</string>
