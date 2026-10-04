@@ -43,4 +43,16 @@
     <string name="window_state_attached">Attached</string>
     <string name="window_state_detached">Detached</string>
     <string name="config_unsupported">This daemon does not know this option — rebuild the module from this source tree to enable it.</string>
+    <string name="section_onscreen">On-screen input</string>
+    <string name="touchpad_tip">Touchpad (use the window as a laptop pad: one finger moves the pointer, a tap clicks, long-press then drag drags, two fingers scroll, a two-finger tap right-clicks. Applies to windows opened from now on):</string>
+    <string name="touchpad">On-screen touchpad</string>
+    <string name="kbd_bar_tip">Shortcut key bar (Esc, Tab, Ctrl, Alt, Shift, Super, arrows, Enter, Backspace. Ctrl/Alt/Shift/Super latch: tap to hold, tap again to release. Applies to windows opened from now on):</string>
+    <string name="kbd_bar">Shortcut key bar</string>
+    <string name="edge_inset_tip">Edge inset (keep a band the height of the status bar clear on the window\'s long axis — top and bottom in portrait, left and right in landscape — so the client\'s own toolbar and the panel\'s rounded corners do not overlap. Applies to windows opened from now on):</string>
+    <string name="edge_inset">Edge inset</string>
+    <string name="section_screen_mode">Screen mode</string>
+    <string name="screen_mode_tip">How the Linux canvas maps onto the panel. On a fixed screen "sharp", "complete" and "magnified" cannot all hold at once — a 1.5x view can only show 848 of 1272 pixels:</string>
+    <string name="screen_mode_exact">Exact (1:1, sharpest, never cropped — zoom has no effect)</string>
+    <string name="screen_mode_follow">Follow window with zoom (UI grows; wide windows clip at the edge)</string>
+    <string name="screen_mode_desktop">Whole desktop 1920x1080 (scaled to fit with letterbox, never cropped)</string>
 </resources>

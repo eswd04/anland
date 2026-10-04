@@ -67,7 +67,9 @@ public class WlSettingsActivity extends Activity {
         buildRenderer(root);
         root.addView(Ui.divider(this));
 
+        buildScreenMode(root);
         buildInput(root);
+        buildOnScreenInput(root);
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -321,6 +323,105 @@ public class WlSettingsActivity extends Activity {
                         .putInt("ime_mode", checkedId == ID_IME_OVERLAY ? 1 : 0)
                         .apply());
         root.addView(imeRg);
+    }
+
+    // --------------------------------------------------------- on-screen input
+
+    /** On-screen touchpad and shortcut key bar: the two things a phone screen
+     *  lacks when a Linux desktop runs inside the window. Both are stored
+     *  APK-local and read by the window Activity while it builds its view tree,
+     *  so a change applies to windows opened from now on. */
+    private void buildOnScreenInput(LinearLayout root) {
+        root.addView(Ui.section(this, R.string.section_onscreen));
+
+        root.addView(Ui.tip(this, R.string.touchpad_tip));
+        Switch padSw = new Switch(this);
+        padSw.setText(R.string.touchpad);
+        padSw.setChecked(getSharedPreferences("awl", MODE_PRIVATE).getInt("touchpad", 0) != 0);
+        padSw.setOnCheckedChangeListener((b, on) ->
+                getSharedPreferences("awl", MODE_PRIVATE).edit()
+                        .putInt("touchpad", on ? 1 : 0).apply());
+        root.addView(Ui.switchRow(this, padSw));
+
+        root.addView(Ui.gap(this, 12));
+        root.addView(Ui.tip(this, R.string.kbd_bar_tip));
+        Switch barSw = new Switch(this);
+        barSw.setText(R.string.kbd_bar);
+        barSw.setChecked(getSharedPreferences("awl", MODE_PRIVATE).getInt("kbd_bar", 0) != 0);
+        barSw.setOnCheckedChangeListener((b, on) ->
+                getSharedPreferences("awl", MODE_PRIVATE).edit()
+                        .putInt("kbd_bar", on ? 1 : 0).apply());
+        root.addView(Ui.switchRow(this, barSw));
+
+        root.addView(Ui.gap(this, 12));
+        root.addView(Ui.tip(this, R.string.edge_inset_tip));
+        Switch edgeSw = new Switch(this);
+        edgeSw.setText(R.string.edge_inset);
+        edgeSw.setChecked(getSharedPreferences("awl", MODE_PRIVATE)
+                .getInt("edge_inset", 1) != 0);
+        edgeSw.setOnCheckedChangeListener((b, on) ->
+                getSharedPreferences("awl", MODE_PRIVATE).edit()
+                        .putInt("edge_inset", on ? 1 : 0).apply());
+        root.addView(Ui.switchRow(this, edgeSw));
+    }
+
+    // ------------------------------------------------------------ screen mode
+
+    /* Radio ids, unique within this activity (3/4 IME, 5/6/7 scaling). */
+    private static final int ID_MODE_EXACT = 8;
+    private static final int ID_MODE_FOLLOW = 9;
+    private static final int ID_MODE_DESKTOP = 10;
+
+    /** Desktop canvas used by the "whole desktop" mode. 16:9 fits a landscape
+     *  desktop into the portrait panel with letterbox bars — shared up or down,
+     *  never cropped. */
+    private static final int DESKTOP_CANVAS_W = 1920;
+    private static final int DESKTOP_CANVAS_H = 1080;
+
+    /**
+     * How the client canvas relates to the window. Three policies, because on a
+     * fixed panel "sharp", "complete" and "magnified" cannot all hold: a 1.5x
+     * view can only show 848 of the panel's 1272 pixels.
+     */
+    private void buildScreenMode(LinearLayout root) {
+        root.addView(Ui.section(this, R.string.section_screen_mode));
+        root.addView(Ui.tip(this, R.string.screen_mode_tip));
+
+        RadioGroup rg = new RadioGroup(this);
+        RadioButton rbExact = Ui.radio(this, ID_MODE_EXACT, R.string.screen_mode_exact);
+        RadioButton rbFollow = Ui.radio(this, ID_MODE_FOLLOW, R.string.screen_mode_follow);
+        RadioButton rbDesktop = Ui.radio(this, ID_MODE_DESKTOP, R.string.screen_mode_desktop);
+        rg.addView(rbExact);
+        rg.addView(rbFollow);
+        rg.addView(rbDesktop);
+
+        /* -2 and -1 are DIFFERENT modes (strict 1:1 vs follow-the-window/zoom),
+         * so the test has to be per-value: a plain `cw < 0` showed the strict
+         * mode as "follow", which is not what is running. A canvas that was
+         * never set (0, or only one axis present) has no radio of its own — it
+         * predates this page — and is shown as strict, the mode whose behaviour
+         * it most resembles; picking anything writes an explicit value. */
+        final int cw = WlBinder.configGet("canvas_w");
+        final int ch = WlBinder.configGet("canvas_h");
+        RadioButton checked = rbExact;
+        if (cw > 0 && ch > 0) checked = rbDesktop;
+        else if (cw == -1 || ch == -1) checked = rbFollow;
+        checked.setChecked(true);
+
+        /* listener AFTER the initial setChecked: opening the page must not write */
+        rg.setOnCheckedChangeListener((g, id) -> {
+            if (id == ID_MODE_EXACT) {
+                WlBinder.configSet("canvas_w", -2);
+                WlBinder.configSet("canvas_h", -2);
+            } else if (id == ID_MODE_FOLLOW) {
+                WlBinder.configSet("canvas_w", -1);
+                WlBinder.configSet("canvas_h", -1);
+            } else {
+                WlBinder.configSet("canvas_w", DESKTOP_CANVAS_W);
+                WlBinder.configSet("canvas_h", DESKTOP_CANVAS_H);
+            }
+        });
+        root.addView(rg);
     }
 
     // ------------------------------------------------------------------ helpers

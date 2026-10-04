@@ -110,6 +110,10 @@ public class AwlWindowActivity extends Activity {
     private SurfaceView sv;
     private FrameLayout root;
     private EditText hiddenInput;
+    private WireInput.KeyBar keyBar;            /* on-screen shortcut keys */
+    private WireInput.TouchpadView touchpad;    /* screen used as a touchpad */
+    private int barInset;                       /* key-bar height, reserved out of the surface */
+    private int edgeBand;                       /* reserved band width — see applyEdgeInsets */
     private InputMethodManager imm;
     private CtrlBinder ctrl;
     private int lastW, lastH;
@@ -481,7 +485,9 @@ public class AwlWindowActivity extends Activity {
         sv = new SurfaceView(this);
         sv.getHolder().setFormat(android.graphics.PixelFormat.RGBX_8888);
         sv.getHolder().addCallback(new SurfaceHolder.Callback() {
-            @Override public void surfaceCreated(SurfaceHolder holder) { }
+            @Override public void surfaceCreated(SurfaceHolder holder) {
+                applyFrameRate(holder);
+            }
             @Override public void surfaceChanged(SurfaceHolder holder, int format,
                                                  int width, int height) {
                 if (id < 0) {
@@ -492,6 +498,7 @@ public class AwlWindowActivity extends Activity {
                     return;
                 }
                 Log.i(TAG, "win " + id + " surface " + width + "x" + height);
+                applyFrameRate(holder);
                 if (!attached)
                     sendSurface(holder, width, height);
                 else if (width != lastW || height != lastH) {
@@ -521,6 +528,45 @@ public class AwlWindowActivity extends Activity {
         root.addView(sv, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         root.addView(hiddenInput, new FrameLayout.LayoutParams(1, 1));
+
+        /* On-screen input for the desktop (see WireInput): a key bar for the
+         * shortcuts a phone keyboard cannot send, and a touchpad so the pointer
+         * can move\/click\/scroll\/drag without a physical mouse. Both are
+         * opt-in from the settings page; without them the window behaves as
+         * before (touch goes straight to the client). */
+        android.content.SharedPreferences prefs =
+                getSharedPreferences("awl", MODE_PRIVATE);
+        final int barH = Math.round(38 * getResources().getDisplayMetrics().density);
+        /* The band reserved out of the surface on the window's LONG axis
+         * (applyEdgeInsets): top and bottom in portrait, left and right in
+         * landscape. Its width is the status bar height — the band the system
+         * itself keeps clear — so the client's own toolbar lands below it
+         * instead of under the panel's rounded corners and the system status
+         * bar. Falls back to the corner radius when the system reports none.
+         * "edge_inset" (settings, on by default) turns the band off entirely. */
+        edgeBand = preferredEdgeBand();
+        final boolean wantBar = prefs.getInt("kbd_bar", 0) != 0;
+        final boolean wantPad = prefs.getInt("touchpad", 0) != 0;
+        if (wantBar) {
+            keyBar = new WireInput.KeyBar(this, () -> id, this::toggleIme);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, barH);
+            lp.gravity = android.view.Gravity.BOTTOM;
+            root.addView(keyBar, lp);
+        }
+        if (wantPad) {
+            touchpad = new WireInput.TouchpadView(this, () -> id);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT);
+            if (wantBar) lp.bottomMargin = barH;   /* never cover the key bar */
+            root.addView(touchpad, lp);
+        }
+        if (wantBar) barInset = barH;
+        /* Always: the edge band applies with or without the bar. The bar is
+         * reserved out of the surface with the same mechanism the IME inset
+         * uses, so the client reflows instead of being covered. */
+        applyEdgeInsets(lastImeMargin > 0 ? lastImeMargin : 0);
         /* IME inset: in inset mode the surface yields (client reflows); in overlay mode the keyboard floats above */
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             applyImeInset(insets);
@@ -668,6 +714,17 @@ public class AwlWindowActivity extends Activity {
     protected void onResume() {
         super.onResume();
         setupFullscreen();   /* the system may reset immersive mode */
+        /* the display mode follows the FOCUSED window: coming back from a
+         * background app the panel may be at 60 Hz again, so ask once more */
+        applyFrameRate(sv != null ? sv.getHolder() : null);
+        /* the edge-band switch is APK-local and read while the view tree is
+         * built: re-read it on resume so returning from Settings is enough */
+        int band = preferredEdgeBand();
+        if (band != edgeBand) {
+            edgeBand = band;
+            Log.i(TAG, "win " + id + " edge band → " + band + "px (resumed)");
+            applyEdgeInsets(lastImeMargin > 0 ? lastImeMargin : 0);
+        }
         Awl.registerCallback(winEvents);
         Awl.acquire();   /* process event subscription (sibling windows dying while this one is foreground) */
         if (clipMgr != null)
@@ -687,6 +744,10 @@ public class AwlWindowActivity extends Activity {
 
     @Override
     protected void onPause() {
+        /* a latched modifier or a held drag must not outlive the window: the
+         * compositor would otherwise keep believing the key is still down */
+        if (keyBar != null) keyBar.releaseAll();
+        if (touchpad != null) touchpad.detachPointer();
         fireHost((cbs, win, act) -> cbs.onHostPause(win, act));
         if (clipMgr != null)
             clipMgr.removePrimaryClipChangedListener(clipListener);
@@ -720,6 +781,60 @@ public class AwlWindowActivity extends Activity {
      * hidden-EditText display side: 1x1 invisible, disabled by default;
      * enable+focus+show when needed. The InputConnection below bridges the
      * full table (text → text-input protocol; queries ← state cache). */
+
+    /** Ask the display for a real refresh rate on this window's surface.
+     *
+     *  Two traps, both seen on device:
+     *   - a window that never asks keeps the "normal" rate (60 Hz against this
+     *     120 Hz panel), and the desktop then looks capped at 60;
+     *   - asking for the display's CURRENT rate (getRefreshRate) is
+     *     self-locking — Android answers with whatever the panel happens to be
+     *     running at, so a window created while the panel is at 60 Hz requests
+     *     60 Hz and the panel never leaves 60.
+     *  So pick a target out of the modes the panel actually offers: the best
+     *  rate at this window's resolution, preferring <= 120 Hz (this panel's own
+     *  default) and never below the rate the panel is already at, because the
+     *  request moves the display mode for the whole screen.
+     *  Needs API 30; silently skipped below that. */
+    private static final float PREFERRED_MAX_HZ = 120f;
+
+    private static float targetRefreshRate(android.view.Display d) {
+        if (d == null) return 0f;
+        android.view.Display.Mode cur = d.getMode();
+        float atRes = 0f, capped = 0f, any = 0f;
+        for (android.view.Display.Mode m : d.getSupportedModes()) {
+            float r = m.getRefreshRate();
+            if (r > any) any = r;
+            boolean sameRes = cur == null
+                    || (m.getPhysicalWidth() == cur.getPhysicalWidth()
+                        && m.getPhysicalHeight() == cur.getPhysicalHeight());
+            if (!sameRes) continue;
+            if (r > atRes) atRes = r;
+            /* rounded: this panel reports its 120 Hz mode as 120.00001 */
+            if (Math.round(r) <= PREFERRED_MAX_HZ && r > capped) capped = r;
+        }
+        float pick = capped > 0f ? capped : (atRes > 0f ? atRes : any);
+        float now = d.getRefreshRate();
+        return now > pick ? now : pick;      /* never talk the panel down */
+    }
+
+    private void applyFrameRate(SurfaceHolder holder) {
+        if (android.os.Build.VERSION.SDK_INT < 30) return;
+        android.view.Surface s = holder == null ? null : holder.getSurface();
+        if (s == null || !s.isValid()) return;
+        try {
+            android.view.Display d = getDisplay();
+            float hz = targetRefreshRate(d);
+            if (hz <= 0f) return;
+            s.setFrameRate(hz,
+                    android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                    android.view.Surface.CHANGE_FRAME_RATE_ALWAYS);
+            Log.i(TAG, "win " + id + ": requested " + hz + " Hz on the surface"
+                    + " (panel now " + (d != null ? d.getRefreshRate() : 0f) + " Hz)");
+        } catch (Throwable t) {
+            Log.w(TAG, "setFrameRate failed", t);   /* cosmetic: never fatal */
+        }
+    }
 
     private void initHiddenInput() {
         hiddenInput = new EditText(this) {
@@ -798,9 +913,108 @@ public class AwlWindowActivity extends Activity {
         int margin = imeOverlayMode() ? 0 : imeBottom;
         if (margin == lastImeMargin) return;
         lastImeMargin = margin;
-        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) sv.getLayoutParams();
-        lp.bottomMargin = margin;
-        sv.setLayoutParams(lp);   /* surface resize → configure the client to reflow */
+        applyEdgeInsets(margin);
+    }
+
+    /** The band the settings currently ask for: 0 when the user turned it off,
+     *  otherwise the width to reserve. Read on every entry point that can change
+     *  it — onCreate builds the view tree with it, onResume picks up a change
+     *  made on the settings page, onConfigurationChanged re-applies it for the
+     *  new orientation. */
+    private int preferredEdgeBand() {
+        if (getSharedPreferences("awl", MODE_PRIVATE).getInt("edge_inset", 1) == 0)
+            return 0;
+        return systemBarsInset(Math.round(32 * getResources().getDisplayMetrics().density));
+    }
+
+    /** The band to reserve: the status bar height, or `fallback` when this
+     *  build reports none. Read from the system resource rather than a hardcoded
+     *  dp value — the band has to match what the system actually keeps clear,
+     *  and that varies per device and density. */
+    private int systemBarsInset(int fallback) {
+        try {
+            int id = getResources().getIdentifier("status_bar_height", "dimen", "android");
+            if (id > 0) {
+                int h = getResources().getDimensionPixelSize(id);
+                if (h > 0) return h;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "status_bar_height unavailable, using " + fallback, t);
+        }
+        return fallback;
+    }
+
+    /** Is the window wider than it is tall? Read from the display metrics rather
+     *  than the view bounds: this is also called from onCreate and from
+     *  onConfigurationChanged, where the views have not been measured yet. */
+    private boolean isLandscape() {
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        return dm.widthPixels > dm.heightPixels;
+    }
+
+    private void setMargins(android.view.View v, int l, int t, int r, int b) {
+        if (v == null || !(v.getLayoutParams() instanceof FrameLayout.LayoutParams)) return;
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) v.getLayoutParams();
+        lp.leftMargin = l;
+        lp.topMargin = t;
+        lp.rightMargin = r;
+        lp.bottomMargin = b;
+        v.setLayoutParams(lp);
+    }
+
+    /** Edge insets of the window's children. The desktop surface yields to the
+     *  key bar and the IME so nothing is covered (the surface shrinking is what
+     *  configures the client to reflow); the touchpad keeps matching the surface
+     *  so its coordinates still line up with what the client renders.
+     *
+     *  The corner band follows the LONG axis of the window: portrait → top and
+     *  bottom, landscape → left and right. It costs the same pixels either way,
+     *  but on the long axis it takes a much smaller share of the usable area,
+     *  and in landscape the scarce axis is the height.
+     *  The key bar always stays on the bottom edge; only the band moves. */
+    private void applyEdgeInsets(int imeMargin) {
+        final boolean land = isLandscape();
+        final int sideX = land ? edgeBand : 0;      /* left + right band */
+        final int sideY = land ? 0 : edgeBand;      /* top band */
+        final int bottom = sideY + barInset + imeMargin;
+
+        setMargins(sv, sideX, sideY, sideX, bottom);
+        setMargins(touchpad, sideX, sideY, sideX, bottom);
+        setMargins(keyBar, sideX, 0, sideX, sideY + imeMargin);
+
+        Log.i(TAG, "insets: " + (land ? "landscape" : "portrait")
+                + " side=" + sideX + " top=" + sideY + " bottom=" + bottom
+                + " (bar=" + barInset + " ime=" + imeMargin + ")");
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration cfg) {
+        super.onConfigurationChanged(cfg);
+        /* The manifest lists orientation|screenSize under configChanges, so a
+         * rotation does NOT recreate the Activity: the insets computed in
+         * onCreate would stay from the old orientation. Recompute them; the
+         * surface resize that follows configures the client to reflow. */
+        applyEdgeInsets(lastImeMargin > 0 ? lastImeMargin : 0);
+    }
+
+    /** Summon\/dismiss the Android IME by hand. Normally the client asks
+     *  (text-input protocol → C_IME_SHOW), which a desktop shell does not always
+     *  do on its own; this is the key 5.x provided. */
+    private void toggleIme() {
+        if (imeWanted) {
+            onImeHide();
+            return;
+        }
+        imeWanted = true;
+        if (hiddenInput != null) {
+            /* onImeHide disabled it; the bridge input must be focusable again
+             * before the IME will attach to it */
+            hiddenInput.setEnabled(true);
+            hiddenInput.setFocusable(true);
+            hiddenInput.setFocusableInTouchMode(true);
+            hiddenInput.setInputType(imeInputType());
+        }
+        tryShowIme();
     }
 
     private void onImeShow(int hint, int purpose) {
@@ -1063,7 +1277,22 @@ public class AwlWindowActivity extends Activity {
         @Override
         public boolean commitText(CharSequence text, int newCursorPosition) {
             String t = text == null ? "" : text.toString();
-            AwlClient.ime(id, AwlClient.IME_COMMIT, 0, 0, t);
+            /* Printable ASCII is typed as key events: that path reaches every
+             * client, while text-input only reaches one that created a
+             * text_input object (a desktop shell does not, outside a text
+             * field) — measured: the IME showed but nothing arrived. Anything
+             * else (CJK) has no key and stays on text-input. */
+            boolean allTyped = !t.isEmpty() && id >= 0;
+            if (allTyped) {
+                for (int i = 0; i < t.length() && allTyped; i++)
+                    if (!WireInput.typeable(t.charAt(i))) allTyped = false;
+            }
+            if (allTyped) {
+                for (int i = 0; i < t.length(); i++) WireInput.typeChar(id, t.charAt(i));
+            } else {
+                /* nothing typed yet — send it once, over text-input */
+                AwlClient.ime(id, AwlClient.IME_COMMIT, 0, 0, t);
+            }
             /* keep the virtual editor in step: without this a commit-only
              * session (English typing) leaves surText stale and the next
              * backspace converts to a zero-byte delete (client-side no-op) */
@@ -1569,6 +1798,16 @@ public class AwlWindowActivity extends Activity {
     @Override
     public boolean dispatchTouchEvent(MotionEvent ev) {
         if (id < 0) return super.dispatchTouchEvent(ev);   /* awaiting */
+
+        /* The on-screen input views (touchpad, key bar) sit above the desktop
+         * surface as ordinary Android views, so the view tree gets first
+         * refusal: the forwarding below consumes every gesture at the
+         * Activity level and would otherwise starve them. With neither view
+         * enabled the tree consumes nothing and behaviour is unchanged. */
+        if ((keyBar != null || touchpad != null) && super.dispatchTouchEvent(ev))
+            return true;
+        toSurfaceSpace(ev);   /* the forwarding below speaks surface pixels */
+
         if (isMouse(ev)) {
             int cls = ev.getClassification();
             if (cls == CLS_TWO_FINGER_SWIPE) {
@@ -1591,6 +1830,12 @@ public class AwlWindowActivity extends Activity {
         }
         switch (ev.getActionMasked()) {
         case MotionEvent.ACTION_DOWN:
+            /* ev is already in surface space here; recovering the raw pair makes
+             * an inset offset visible at a glance */
+            Log.d(TAG, "win " + id + " touch down raw=("
+                    + (ev.getX() + sv.getLeft()) + "," + (ev.getY() + sv.getTop())
+                    + ") surface=(" + ev.getX() + "," + ev.getY()
+                    + ") inset=" + sv.getTop());
             sendTouch(TOUCH_DOWN, ev, ev.getActionIndex());
             return true;
         case MotionEvent.ACTION_POINTER_DOWN:
@@ -1613,6 +1858,22 @@ public class AwlWindowActivity extends Activity {
         default:
             return super.dispatchTouchEvent(ev);
         }
+    }
+
+    /** Translate an event from content-view space into desktop-surface space.
+     *
+     *  The surface is inset inside the content view (corner radius above, key
+     *  bar + IME below — see applyEdgeInsets), but MotionEvent coordinates are
+     *  always relative to the content view, and everything the daemon receives
+     *  is surface-local physical pixels (awl_input.c view_to_surface). Without
+     *  this, an absolute touch is delivered one inset away from the finger; the
+     *  on-screen touchpad hides that because its stream is relative.
+     *  Called once per event, after the view tree has had its turn (the input
+     *  views live in the same space and must see the real coordinates). */
+    private void toSurfaceSpace(MotionEvent ev) {
+        if (sv == null) return;
+        int dx = sv.getLeft(), dy = sv.getTop();
+        if (dx != 0 || dy != 0) ev.offsetLocation(-dx, -dy);
     }
 
     private void sendTouch(int type, MotionEvent ev, int idx) {
@@ -1640,6 +1901,7 @@ public class AwlWindowActivity extends Activity {
                 && ev.isFromSource(InputDevice.SOURCE_TOUCHPAD);
         if (!isMouse(ev) && !capturedPad)
             return super.onGenericMotionEvent(ev);
+        toSurfaceSpace(ev);   /* absolute hover/wheel position: surface pixels */
         switch (ev.getActionMasked()) {
         case MotionEvent.ACTION_MOVE:
             /* captured raw touchpad stream (single finger = virtual mouse; two = scroll) */
@@ -1733,6 +1995,17 @@ public class AwlWindowActivity extends Activity {
         }
         if (ev.getAction() == KeyEvent.ACTION_DOWN && ev.getRepeatCount() > 0)
             return true;   /* synthetic repeat — swallow (see above) */
+        /* Letters and digits: fallbackSc has no entry for them, so an
+         * IME-synthesized key (scanCode 0) used to fall through to super and
+         * never reach the client — typing produced nothing. Route them through
+         * the character tables, which also carry the Shift variants. */
+        char ch = letterOrDigit(kc, ev.getMetaState());
+        if (ch != 0) {
+            if (ev.getAction() == KeyEvent.ACTION_DOWN)
+                WireInput.typeChar(id, ch);
+            return true;   /* UP swallowed: the tap already sent down+up */
+        }
+
         int sc = ev.getScanCode();
         if (sc == 0) sc = fallbackSc(kc);
         if (sc > 0) {
@@ -1742,6 +2015,22 @@ public class AwlWindowActivity extends Activity {
             return true;
         }
         return super.dispatchKeyEvent(ev);
+    }
+
+    /** The character a letter/number key stands for, or 0 when the key is not
+     *  one of those (the caller then uses the scanCode path). The Shift state
+     *  comes from the event's meta state, so a shifted letter is a capital. */
+    private static char letterOrDigit(int keyCode, int meta) {
+        boolean shift = (meta & KeyEvent.META_SHIFT_ON) != 0;
+        if (keyCode >= KeyEvent.KEYCODE_A && keyCode <= KeyEvent.KEYCODE_Z) {
+            char c = (char) ('a' + (keyCode - KeyEvent.KEYCODE_A));
+            return shift ? Character.toUpperCase(c) : c;
+        }
+        if (keyCode >= KeyEvent.KEYCODE_0 && keyCode <= KeyEvent.KEYCODE_9) {
+            int d = keyCode - KeyEvent.KEYCODE_0;   /* 0..9 */
+            return shift ? ")!@#$%^&*(".charAt(d) : (char) ('0' + d);
+        }
+        return 0;
     }
 
     /** IME-synthesized key (scanCode=0) → evdev code (matches the embedded keymap) */

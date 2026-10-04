@@ -43,4 +43,16 @@
     <string name="window_state_attached">已挂载</string>
     <string name="window_state_detached">已分离</string>
     <string name="config_unsupported">当前守护进程不认识该选项 —— 需要用本源码树重新构建模块才能启用。</string>
+    <string name="section_onscreen">屏幕输入</string>
+    <string name="touchpad_tip">触控板（把窗口当作笔记本触控板：单指移动指针，轻点即左键，长按后拖动即拖拽，双指滚动，双指轻点为右键。对之后打开的窗口生效）:</string>
+    <string name="touchpad">屏幕触控板</string>
+    <string name="kbd_bar_tip">快捷键栏（Esc、Tab、Ctrl、Alt、Shift、Super、方向键、Enter、退格。Ctrl/Alt/Shift/Super 为锁定式：点一下按住，再点一下松开。对之后打开的窗口生效）:</string>
+    <string name="kbd_bar">快捷键栏</string>
+    <string name="edge_inset_tip">边缘留白（在窗口长边方向留出状态栏高度的空白——竖屏在上下，横屏在左右——避免客户端的工具栏与屏幕圆角重叠。对之后打开的窗口生效）：</string>
+    <string name="edge_inset">边缘留白</string>
+    <string name="section_screen_mode">屏幕模式</string>
+    <string name="screen_mode_tip">Linux 画布如何映射到屏幕。在固定屏幕上「清晰」「完整」「放大」三者不可兼得 —— 放大 1.5 倍时 1272 像素里只能显示 848 个:</string>
+    <string name="screen_mode_exact">原始尺寸（1:1，最清晰，不裁剪 —— 缩放无效）</string>
+    <string name="screen_mode_follow">跟随窗口并缩放（界面变大；宽窗口边缘被裁）</string>
+    <string name="screen_mode_desktop">完整桌面 1920x1080（等比缩放显示，带黑边，不裁剪）</string>
 </resources>
