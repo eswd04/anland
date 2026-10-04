@@ -36,4 +36,11 @@
     <string name="sc_backend">SC 合成后端（HWC）</string>
     <string name="next_serial_tip">configure 序列号（开 = 每次 configure 分配新的 wayland serial；Qt/KDE 的 wayland 客户端会校验该值，守护进程刚启动、还没处理过输入时发出的 serial=0 会被直接丢弃，导致第一个应用不出现窗口。关 = 沿用旧行为）:</string>
     <string name="next_serial">configure 使用新序列号</string>
+    <string name="section_display">显示</string>
+    <string name="section_windows">窗口</string>
+    <string name="section_renderer">渲染</string>
+    <string name="section_input">输入法</string>
+    <string name="window_state_attached">已挂载</string>
+    <string name="window_state_detached">已分离</string>
+    <string name="config_unsupported">当前守护进程不认识该选项 —— 需要用本源码树重新构建模块才能启用。</string>
 </resources>

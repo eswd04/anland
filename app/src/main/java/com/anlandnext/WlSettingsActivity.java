@@ -2,68 +2,94 @@ package com.anlandnext;
 
 import android.app.Activity;
 import android.os.Bundle;
+import android.os.Handler;
+import android.view.View;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.NumberPicker;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
+import android.widget.ScrollView;
+import android.widget.SeekBar;
+import android.widget.Switch;
 import android.widget.TextView;
 
-/** Window behavior settings.
- *  IME mode → SharedPreferences (APK-local, read by WlWindowActivity);
- *  display zoom → daemon config.json (the daemon is the single source of
- *  truth, read/written over binder, #31).
- *  (The exit-behavior setting is gone: swiping away / killing the background
- *  is fixed to minimize-and-keep-alive, and the only close entry is the
- *  window-list long-press menu — all decisions live in the daemon, the APK
- *  has no policy left to configure.) */
+import java.util.function.IntConsumer;
+
+/**
+ * Window / display settings.
+ *
+ * Two stores: the IME mode lives in SharedPreferences (APK-local, read by the
+ * window Activity), everything else is a daemon config key — the daemon is the
+ * single numeric source of truth, read and written over binder (#31), and the
+ * value is persisted to its own config.json. A key the running daemon does not
+ * know (older module build) reads back as -1: the switch is then shown
+ * disabled instead of pretending to own a value.
+ *
+ * Layout is built in code; see Ui for the dp/sp and accent helpers. Sections
+ * are grouped and separated so the page is scannable.
+ */
 public class WlSettingsActivity extends Activity {
+
+    /* RadioButton ids — unique per activity: the IME group uses 3/4, the
+     * scaling group 5/6/7. */
+    private static final int ID_IME_INSET = 3;
+    private static final int ID_IME_OVERLAY = 4;
+    private static final int ID_SCALE_STRETCH = 5;
+    private static final int ID_SCALE_FIT = 6;
+    private static final int ID_SCALE_CENTER = 7;
+
+    /** Shared by the zoom and initial-size debounces. */
+    private final Handler h = new Handler();
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setTitle(R.string.settings_title);
 
-        android.widget.LinearLayout root = new android.widget.LinearLayout(this);
-        root.setOrientation(android.widget.LinearLayout.VERTICAL);
-        root.setPadding(48, 64, 48, 48);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        int p = Ui.dp(this, 20);
+        root.setPadding(p, Ui.dp(this, 12), p, Ui.dp(this, 40));
 
-        /* ---- IME display mode ---- */
-        TextView imeTip = new TextView(this);
-        imeTip.setText(R.string.ime_mode_tip);
-        root.addView(imeTip);
+        if (!WlBinder.available()) {
+            TextView warn = Ui.note(this, R.string.status_daemon_unreachable);
+            warn.setPadding(0, 0, 0, Ui.dp(this, 8));
+            root.addView(warn);
+        }
 
-        RadioGroup imeRg = new RadioGroup(this);
-        RadioButton inset = new RadioButton(this);
-        inset.setId(3);
-        inset.setText(R.string.ime_mode_inset);
-        RadioButton overlay = new RadioButton(this);
-        overlay.setId(4);
-        overlay.setText(R.string.ime_mode_overlay);
+        buildDisplay(root);
+        root.addView(Ui.divider(this));
 
-        imeRg.addView(inset);
-        imeRg.addView(overlay);
-        int imeMode = getSharedPreferences("awl", MODE_PRIVATE).getInt("ime_mode", 0);
-        (imeMode != 0 ? overlay : inset).setChecked(true);
-        imeRg.setOnCheckedChangeListener((g, checkedId) ->
-                getSharedPreferences("awl", MODE_PRIVATE).edit()
-                        .putInt("ime_mode", checkedId == 4 ? 1 : 0)
-                        .apply());
-        root.addView(imeRg);
+        buildWindows(root);
+        root.addView(Ui.divider(this));
 
-        /* ---- Display zoom (arbitrary ratio, daemon-side; #31) ---- */
-        android.widget.Space gap2 = new android.widget.Space(this);
-        gap2.setMinimumHeight(64);
-        root.addView(gap2);
+        buildRenderer(root);
+        root.addView(Ui.divider(this));
 
-        TextView zoomTip = new TextView(this);
-        zoomTip.setText(R.string.zoom_tip);
-        root.addView(zoomTip);
+        buildInput(root);
 
-        TextView zoomVal = new TextView(this);
-        zoomVal.setTextSize(20);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.addView(root);
+        setContentView(scroll);
+    }
+
+    // ------------------------------------------------------------------ display
+
+    private void buildDisplay(LinearLayout root) {
+        root.addView(Ui.section(this, R.string.section_display));
+
+        root.addView(Ui.tip(this, R.string.zoom_tip));
+
+        final TextView zoomVal = Ui.value(this, "");
         root.addView(zoomVal);
 
+        final int[] cur = {100};
         int got = WlBinder.configGet("zoom");
-        final int[] cur = {(got < 50 || got > 300) ? 100 : got};   /* daemon down / unknown → 100 */
+        cur[0] = (got < 50 || got > 300) ? 100 : got;   /* daemon down / unknown → 100 */
 
-        android.widget.SeekBar seek = new android.widget.SeekBar(this);
+        final SeekBar seek = new SeekBar(this);
         seek.setMax(250);          /* progress = pct - 50 → any value in 50..300 */
         seek.setProgress(cur[0] - 50);
         root.addView(seek);
@@ -71,21 +97,20 @@ public class WlSettingsActivity extends Activity {
         /* 200ms drag debounce + immediate on release/preset — applies
          * dynamically without bombarding per tick (each set = a
          * preferred_scale broadcast + re-configure of every window) */
-        android.os.Handler h = new android.os.Handler(getMainLooper());
         final Runnable[] pending = new Runnable[1];
-        Runnable apply = () -> WlBinder.configSet("zoom", cur[0]);
-        java.util.function.IntConsumer showZoom = pct ->
-                zoomVal.setText(pct + "%  =  " + (pct / 100.0) + "×");
+        final Runnable apply = () -> WlBinder.configSet("zoom", cur[0]);
+        final IntConsumer showZoom =
+                pct -> zoomVal.setText(pct + "%  =  " + (pct / 100.0) + "×");
 
-        java.util.function.IntConsumer setZoom = pct -> {
+        final IntConsumer setZoom = pct -> {
             cur[0] = pct;
             seek.setProgress(pct - 50);
             showZoom.accept(pct);
             if (pending[0] != null) h.removeCallbacks(pending[0]);
             h.post(apply);   /* preset: immediate */
         };
-        seek.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
-            @Override public void onProgressChanged(android.widget.SeekBar sb, int prog, boolean fromUser) {
+        seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar sb, int prog, boolean fromUser) {
                 if (!fromUser) return;
                 cur[0] = prog + 50;
                 showZoom.accept(cur[0]);
@@ -94,8 +119,8 @@ public class WlSettingsActivity extends Activity {
                 pending[0] = () -> WlBinder.configSet("zoom", pct);
                 h.postDelayed(pending[0], 200);
             }
-            @Override public void onStartTrackingTouch(android.widget.SeekBar sb) { }
-            @Override public void onStopTrackingTouch(android.widget.SeekBar sb) {
+            @Override public void onStartTrackingTouch(SeekBar sb) { }
+            @Override public void onStopTrackingTouch(SeekBar sb) {
                 if (pending[0] != null) h.removeCallbacks(pending[0]);
                 pending[0] = null;
                 h.post(apply);   /* release: immediate */
@@ -103,136 +128,97 @@ public class WlSettingsActivity extends Activity {
         });
         showZoom.accept(cur[0]);
 
-        android.widget.LinearLayout presets = new android.widget.LinearLayout(this);
-        presets.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        LinearLayout presets = new LinearLayout(this);
+        presets.setOrientation(LinearLayout.HORIZONTAL);
         int[] ratios = {100, 150, 175, 200, 250};
         for (int r : ratios) {
-            android.widget.Button btn = new android.widget.Button(this);
-            btn.setText(r + "%");
+            Button btn = Ui.preset(this, r + "%");
             btn.setOnClickListener(v -> setZoom.accept(r));
-            android.widget.LinearLayout.LayoutParams lp =
-                    new android.widget.LinearLayout.LayoutParams(
-                            0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-            presets.addView(btn, lp);
+            presets.addView(btn, Ui.weightedGap(this));
         }
         root.addView(presets);
 
-        /* ---- Window scaling mode (fixed-size windows under resize, daemon
-         *      config scale_mode; #34 — stretch/fit-letterbox/centered 1:1) ---- */
-        android.widget.Space gap25 = new android.widget.Space(this);
-        gap25.setMinimumHeight(64);
-        root.addView(gap25);
-
-        TextView scaleTip = new TextView(this);
-        scaleTip.setText(R.string.scale_mode_tip);
-        root.addView(scaleTip);
+        /* ---- scaling mode under resize (daemon config scale_mode; #34) ---- */
+        root.addView(Ui.gap(this, 10));
+        root.addView(Ui.tip(this, R.string.scale_mode_tip));
 
         RadioGroup scaleRg = new RadioGroup(this);
-        RadioButton stretch = new RadioButton(this);
-        stretch.setId(5);   /* unique within this activity (IME group uses 3/4) */
-        stretch.setText(R.string.scale_mode_stretch);
-        RadioButton fit = new RadioButton(this);
-        fit.setId(6);
-        fit.setText(R.string.scale_mode_fit);
-        RadioButton center = new RadioButton(this);
-        center.setId(7);
-        center.setText(R.string.scale_mode_center);
-        scaleRg.addView(stretch);
-        scaleRg.addView(fit);
-        scaleRg.addView(center);
+        scaleRg.addView(Ui.radio(this, ID_SCALE_STRETCH, R.string.scale_mode_stretch));
+        scaleRg.addView(Ui.radio(this, ID_SCALE_FIT, R.string.scale_mode_fit));
+        scaleRg.addView(Ui.radio(this, ID_SCALE_CENTER, R.string.scale_mode_center));
         int gotMode = WlBinder.configGet("scale_mode");
         if (gotMode < 0 || gotMode > 2) gotMode = 0;   /* daemon down / unknown → stretch */
-        (gotMode == 2 ? center : gotMode == 1 ? fit : stretch).setChecked(true);
+        (gotMode == 2 ? (RadioButton) scaleRg.getChildAt(2)
+                : gotMode == 1 ? (RadioButton) scaleRg.getChildAt(1)
+                : (RadioButton) scaleRg.getChildAt(0)).setChecked(true);
         /* listener AFTER the initial setChecked: opening the page must not
          * fire a write back to the daemon */
         scaleRg.setOnCheckedChangeListener((g, checkedId) ->
                 WlBinder.configSet("scale_mode",
-                        checkedId == 7 ? 2 : checkedId == 6 ? 1 : 0));
+                        checkedId == ID_SCALE_CENTER ? 2 : checkedId == ID_SCALE_FIT ? 1 : 0));
         root.addView(scaleRg);
 
-        /* ---- XWayland scaling (daemon config xwayland_scale: X11 clients
-         *      receive the zoom-adjusted X size on resize, then the existing
-         *      stretch path scales them over the Android window) ---- */
-        android.widget.Space gap26 = new android.widget.Space(this);
-        gap26.setMinimumHeight(64);
-        root.addView(gap26);
+        /* ---- XWayland scaling (X11 clients receive the zoom-adjusted X size
+         *      on resize, then the existing stretch path scales them) ---- */
+        root.addView(Ui.gap(this, 10));
+        root.addView(Ui.tip(this, R.string.xwayland_scale_tip));
+        Switch xwaylandScaleSw = new Switch(this);
+        bindSwitch(xwaylandScaleSw, R.string.xwayland_scale, "xwayland_scale", true);
+        root.addView(Ui.switchRow(this, xwaylandScaleSw));
+    }
 
-        TextView xwaylandScaleTip = new TextView(this);
-        xwaylandScaleTip.setText(R.string.xwayland_scale_tip);
-        root.addView(xwaylandScaleTip);
+    // ------------------------------------------------------------------ windows
 
-        android.widget.Switch xwaylandScaleSw = new android.widget.Switch(this);
-        xwaylandScaleSw.setText(R.string.xwayland_scale);
-        int gotXwaylandScale = WlBinder.configGet("xwayland_scale");
-        xwaylandScaleSw.setChecked(gotXwaylandScale != 0); /* daemon default on */
-        /* listener AFTER the initial state: opening the page must not fire a
-         * write back to the daemon */
-        xwaylandScaleSw.setOnCheckedChangeListener((b, on) ->
-                WlBinder.configSet("xwayland_scale", on ? 1 : 0));
-        root.addView(xwaylandScaleSw);
+    private void buildWindows(LinearLayout root) {
+        root.addView(Ui.section(this, R.string.section_windows));
 
-        /* ---- Auto attach (daemon config auto_attach: on = the daemon am-starts
-         *      the host window the moment a wayland window is created; off =
-         *      the window waits for a binder SURFACE from its app — the
-         *      third-party path. Effective for windows created from now on.) */
-        android.widget.Space gap24 = new android.widget.Space(this);
-        gap24.setMinimumHeight(64);
-        root.addView(gap24);
+        /* auto_attach: off = the window waits for a binder SURFACE from its
+         * app (the third-party path); effective for windows created from now
+         * on. */
+        root.addView(Ui.tip(this, R.string.auto_attach_tip));
+        Switch autoSw = new Switch(this);
+        bindSwitch(autoSw, R.string.auto_attach, "auto_attach", false);
+        root.addView(Ui.switchRow(this, autoSw));
 
-        TextView autoTip = new TextView(this);
-        autoTip.setText(R.string.auto_attach_tip);
-        root.addView(autoTip);
+        /* ---- initial window size (first-frame configure placeholder; #33,
+         *      new windows only) ---- */
+        root.addView(Ui.gap(this, 12));
+        root.addView(Ui.tip(this, R.string.init_size_tip));
 
-        android.widget.Switch autoSw = new android.widget.Switch(this);
-        autoSw.setText(R.string.auto_attach);
-        int gotAuto = WlBinder.configGet("auto_attach");
-        autoSw.setChecked(gotAuto == 1);   /* daemon down / unknown → off */
-        /* listener AFTER the initial state: opening the page must not fire a
-         * write back to the daemon */
-        autoSw.setOnCheckedChangeListener((b, on) -> WlBinder.configSet("auto_attach", on ? 1 : 0));
-        root.addView(autoSw);
+        final int[] sz = {800, 600};
+        int gw = WlBinder.configGet("init_w");
+        int gh = WlBinder.configGet("init_h");
+        sz[0] = (gw >= 100 && gw <= 7680) ? gw : 800;   /* daemon down → defaults */
+        sz[1] = (gh >= 100 && gh <= 4320) ? gh : 600;
 
-        /* ---- Initial window size (first-frame configure placeholder; #33,
-         *      daemon config init_w/init_h — new windows only) ---- */
-        android.widget.Space gap3 = new android.widget.Space(this);
-        gap3.setMinimumHeight(64);
-        root.addView(gap3);
-
-        TextView sizeTip = new TextView(this);
-        sizeTip.setText(R.string.init_size_tip);
-        root.addView(sizeTip);
-
-        final TextView sizeVal = new TextView(this);
-        sizeVal.setTextSize(20);
+        final TextView sizeVal = Ui.value(this, "");
         root.addView(sizeVal);
 
         /* pickers bounded to the daemon's accepted domain (a set outside it
-         * is rejected — keep the UI from producing one) */
-        final android.widget.NumberPicker wp = new android.widget.NumberPicker(this);
-        final android.widget.NumberPicker hp = new android.widget.NumberPicker(this);
-        android.widget.LinearLayout pickers = new android.widget.LinearLayout(this);
-        pickers.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+         * is rejected — keep the UI from producing one); the horizontal
+         * padding keeps the wheel away from the labels */
+        final NumberPicker wp = new NumberPicker(this);
+        final NumberPicker hp = new NumberPicker(this);
+
+        LinearLayout pickers = new LinearLayout(this);
+        pickers.setOrientation(LinearLayout.HORIZONTAL);
+        pickers.setGravity(android.view.Gravity.CENTER_VERTICAL);
+
         TextView wl = new TextView(this);
         wl.setText(R.string.init_size_w);
-        android.widget.LinearLayout.LayoutParams plp =
-                new android.widget.LinearLayout.LayoutParams(
-                        0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        android.widget.LinearLayout.LayoutParams tlp =
-                new android.widget.LinearLayout.LayoutParams(
-                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
-                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
-        pickers.addView(wl, tlp);
-        pickers.addView(wp, plp);
+        wl.setTextSize(14);
+        wl.setAlpha(0.8f);
         TextView hl = new TextView(this);
         hl.setText(R.string.init_size_h);
-        pickers.addView(hl, tlp);
-        pickers.addView(hp, plp);
-        root.addView(pickers);
+        hl.setTextSize(14);
+        hl.setAlpha(0.8f);
 
-        int gw = WlBinder.configGet("init_w");
-        int gh = WlBinder.configGet("init_h");
-        final int[] sz = {(gw >= 100 && gw <= 7680) ? gw : 800,   /* daemon down → defaults */
-                          (gh >= 100 && gh <= 4320) ? gh : 600};
+        pickers.addView(wl);
+        pickers.addView(wp, Ui.weighted());
+        pickers.addView(Ui.hgap(this, 12));
+        pickers.addView(hl);
+        pickers.addView(hp, Ui.weighted());
+        root.addView(pickers);
 
         /* debounce like zoom (a scroll fires many changes); presets apply
          * immediately */
@@ -252,8 +238,8 @@ public class WlSettingsActivity extends Activity {
             };
             h.postDelayed(pendSz[0], 300);
         };
-        android.widget.NumberPicker.OnValueChangeListener ncl = (p, o, n) -> {
-            if (p == wp) sz[0] = n; else sz[1] = n;
+        NumberPicker.OnValueChangeListener ncl = (picker, oldV, newV) -> {
+            if (picker == wp) sz[0] = newV; else sz[1] = newV;
             changedSz.run();
         };
         wp.setMinValue(100);
@@ -267,12 +253,11 @@ public class WlSettingsActivity extends Activity {
         hp.setValue(sz[1]);
         hp.setOnValueChangedListener(ncl);
 
-        android.widget.LinearLayout sizes = new android.widget.LinearLayout(this);
-        sizes.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-        int[][] presets2 = {{800, 600}, {1024, 768}, {1280, 720}, {1920, 1080}};
-        for (int[] s : presets2) {
-            android.widget.Button btn = new android.widget.Button(this);
-            btn.setText(s[0] + "×" + s[1]);
+        LinearLayout sizes = new LinearLayout(this);
+        sizes.setOrientation(LinearLayout.HORIZONTAL);
+        int[][] sizePresets = {{800, 600}, {1024, 768}, {1280, 720}, {1920, 1080}};
+        for (int[] s : sizePresets) {
+            Button btn = Ui.preset(this, s[0] + "×" + s[1]);
             btn.setOnClickListener(v -> {
                 if (pendSz[0] != null) h.removeCallbacks(pendSz[0]);
                 pendSz[0] = null;
@@ -283,63 +268,83 @@ public class WlSettingsActivity extends Activity {
                 showSz.run();
                 h.post(applySz);
             });
-            sizes.addView(btn, lp1());
+            sizes.addView(btn, Ui.weightedGap(this));
         }
         root.addView(sizes);
         showSz.run();
-
-        /* ---- Compositor backend (daemon config sc_enabled: on = the SC
-         *      path — wayland layers become sibling ASurfaceControls
-         *      composed by SurfaceFlinger/HWC, dma-buf scanout when
-         *      allowed; off = the per-window GL renderer fallback.
-         *      Windows already attached keep their backend until
-         *      re-attach — effective for windows attached from now on.) */
-        android.widget.Space gap4 = new android.widget.Space(this);
-        gap4.setMinimumHeight(64);
-        root.addView(gap4);
-
-        TextView scTip = new TextView(this);
-        scTip.setText(R.string.sc_backend_tip);
-        root.addView(scTip);
-
-        android.widget.Switch scSw = new android.widget.Switch(this);
-        scSw.setText(R.string.sc_backend);
-        int gotSc = WlBinder.configGet("sc_enabled");
-        scSw.setChecked(gotSc != 0);   /* daemon down / unknown → on (the daemon default) */
-        /* listener AFTER the initial state: opening the page must not fire a
-         * write back to the daemon */
-        scSw.setOnCheckedChangeListener((b, on) -> WlBinder.configSet("sc_enabled", on ? 1 : 0));
-        root.addView(scSw);
-
-        /* ---- Configure serial (daemon config next_serial: on = every
-         *      xdg_surface.configure carries a freshly allocated wayland
-         *      serial. Qt/KDE wayland clients validate it and silently
-         *      drop a serial-0 configure — which is what a daemon that has
-         *      not handled any input yet used to send, leaving the first
-         *      app without an Android window. Off = legacy behaviour.) */
-        android.widget.Space gap5 = new android.widget.Space(this);
-        gap5.setMinimumHeight(64);
-        root.addView(gap5);
-
-        TextView nsTip = new TextView(this);
-        nsTip.setText(R.string.next_serial_tip);
-        root.addView(nsTip);
-
-        android.widget.Switch nsSw = new android.widget.Switch(this);
-        nsSw.setText(R.string.next_serial);
-        int gotNs = WlBinder.configGet("next_serial");
-        nsSw.setChecked(gotNs != 0);   /* daemon down / unknown → on (the daemon default) */
-        nsSw.setOnCheckedChangeListener((b, on) -> WlBinder.configSet("next_serial", on ? 1 : 0));
-        root.addView(nsSw);
-
-        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
-        scroll.setFillViewport(true);
-        scroll.addView(root);
-        setContentView(scroll);
     }
 
-    private static android.widget.LinearLayout.LayoutParams lp1() {
-        return new android.widget.LinearLayout.LayoutParams(
-                0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+    // ----------------------------------------------------------------- renderer
+
+    private void buildRenderer(LinearLayout root) {
+        root.addView(Ui.section(this, R.string.section_renderer));
+
+        /* sc_enabled: on = wayland layers become sibling ASurfaceControls
+         * composed by SurfaceFlinger/HWC, dma-buf scanout when allowed; off =
+         * the per-window GL renderer fallback. Windows already attached keep
+         * their backend until they re-attach. */
+        root.addView(Ui.tip(this, R.string.sc_backend_tip));
+        Switch scSw = new Switch(this);
+        bindSwitch(scSw, R.string.sc_backend, "sc_enabled", true);
+        root.addView(Ui.switchRow(this, scSw));
+
+        /* next_serial: on = every xdg_surface.configure carries a freshly
+         * allocated wayland serial. Clients that validate it silently drop a
+         * serial-0 configure — which is what a daemon that has not handled any
+         * input yet used to send, leaving the first app with no window. */
+        root.addView(Ui.gap(this, 12));
+        root.addView(Ui.tip(this, R.string.next_serial_tip));
+        Switch nsSw = new Switch(this);
+        boolean nsKnown = bindSwitch(nsSw, R.string.next_serial, "next_serial", true);
+        root.addView(Ui.switchRow(this, nsSw));
+        if (!nsKnown) {
+            TextView un = Ui.note(this, R.string.config_unsupported);
+            un.setPadding(0, Ui.dp(this, 4), 0, 0);
+            root.addView(un);
+        }
+    }
+
+    // -------------------------------------------------------------------- input
+
+    private void buildInput(LinearLayout root) {
+        root.addView(Ui.section(this, R.string.section_input));
+        root.addView(Ui.tip(this, R.string.ime_mode_tip));
+
+        RadioGroup imeRg = new RadioGroup(this);
+        imeRg.addView(Ui.radio(this, ID_IME_INSET, R.string.ime_mode_inset));
+        imeRg.addView(Ui.radio(this, ID_IME_OVERLAY, R.string.ime_mode_overlay));
+
+        int imeMode = getSharedPreferences("awl", MODE_PRIVATE).getInt("ime_mode", 0);
+        ((RadioButton) imeRg.getChildAt(imeMode != 0 ? 1 : 0)).setChecked(true);
+        imeRg.setOnCheckedChangeListener((g, checkedId) ->
+                getSharedPreferences("awl", MODE_PRIVATE).edit()
+                        .putInt("ime_mode", checkedId == ID_IME_OVERLAY ? 1 : 0)
+                        .apply());
+        root.addView(imeRg);
+    }
+
+    // ------------------------------------------------------------------ helpers
+
+    /**
+     * Wires one daemon config key to a switch: initial state plus a write on
+     * user change. The listener is registered AFTER the initial setChecked, so
+     * merely opening the page never writes back to the daemon.
+     *
+     * @param onWhenUnknown the daemon default, used when the key reads back as
+     *                      -1 (daemon down, or a module build that predates the
+     *                      key)
+     * @return false when the daemon does not know the key — the switch is left
+     *         disabled and the caller labels why
+     */
+    private boolean bindSwitch(Switch sw, int labelRes, String key, boolean onWhenUnknown) {
+        sw.setText(labelRes);
+        int got = WlBinder.configGet(key);
+        sw.setChecked(got == -1 ? onWhenUnknown : got != 0);
+        if (got == -1) {
+            sw.setEnabled(false);
+            return false;
+        }
+        sw.setOnCheckedChangeListener((b, on) -> WlBinder.configSet(key, on ? 1 : 0));
+        return true;
     }
 }

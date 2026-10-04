@@ -3,15 +3,12 @@ package com.anlandnext;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
-import android.graphics.Color;
-import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.Menu;
 import android.view.View;
-import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.PopupMenu;
 import android.widget.ScrollView;
@@ -62,17 +59,21 @@ public class MainActivity extends Activity {
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(32, 48, 32, 48);
+        int p = Ui.dp(this, 20);
+        root.setPadding(p, Ui.dp(this, 16), p, Ui.dp(this, 10));
 
         status = new TextView(this);
         status.setTextSize(14);
+        status.setAlpha(0.75f);
+        status.setPadding(0, 0, 0, Ui.dp(this, 10));
         root.addView(status);
 
-        Button settings = new Button(this);
-        settings.setText(R.string.settings_title);
+        android.widget.Button settings = Ui.action(this, R.string.settings_title);
         settings.setOnClickListener(v ->
                 startActivity(new Intent(this, WlSettingsActivity.class)));
         root.addView(settings);
+
+        root.addView(Ui.gap(this, 14));
 
         ScrollView sc = new ScrollView(this);
         list = new LinearLayout(this);
@@ -109,16 +110,24 @@ public class MainActivity extends Activity {
         List<Awl.WlWindow> wins = Awl.getWindows();
         if (wins == null) {
             status.setText(R.string.status_daemon_unreachable);
+            status.setTextColor(Ui.stateDetached());
             return;
         }
         Awl.ensureSubscribed();   /* daemon restarted under us → re-subscribe the event stream */
+        status.setTextColor(Ui.themeColor(this, android.R.attr.textColorPrimary, 0xFF888888));
         status.setText(getString(R.string.status_window_count, wins.size()));
-        for (Awl.WlWindow w : wins) list.addView(row(w));
+        for (int i = 0; i < wins.size(); i++) {
+            if (i > 0) list.addView(Ui.divider(this));
+            list.addView(row(wins.get(i)));
+        }
         if (wins.isEmpty()) {
             TextView empty = new TextView(this);
             empty.setText(R.string.status_empty);
             empty.setGravity(Gravity.CENTER);
-            empty.setPadding(0, 96, 0, 0);
+            empty.setTextSize(14);
+            empty.setAlpha(0.6f);
+            empty.setLineSpacing(Ui.dp(this, 3), 1f);
+            empty.setPadding(0, Ui.dp(this, 72), 0, 0);
             list.addView(empty);
         }
     }
@@ -127,20 +136,25 @@ public class MainActivity extends Activity {
         LinearLayout r = new LinearLayout(this);
         r.setOrientation(LinearLayout.HORIZONTAL);
         r.setGravity(Gravity.CENTER_VERTICAL);
-        r.setPadding(24, 28, 24, 28);
+        int px = Ui.dp(this, 6);
+        r.setPadding(0, Ui.dp(this, 14), 0, Ui.dp(this, 14));
+        r.setMinimumHeight(Ui.dp(this, 56));
 
         TextView t = new TextView(this);
         t.setText(w.title == null || w.title.isEmpty()
                 ? getString(R.string.window_fallback_title, w.id) : w.title);
         t.setTextSize(16);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        t.setPadding(px, 0, px, 0);
         r.addView(t, new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        if (w.attached) t.setTextColor(Ui.themeColor(this, android.R.attr.textColorPrimary, 0xFF888888));
+        else t.setAlpha(0.62f);   /* unattached windows read as secondary */
 
         TextView st = new TextView(this);
-        st.setText(w.attached ? "Attached" : "Detached");
+        st.setText(w.attached ? R.string.window_state_attached : R.string.window_state_detached);
         st.setTextSize(13);
-        st.setTextColor(w.attached ? Color.rgb(0, 128, 0) : Color.rgb(160, 96, 0));
+        st.setTextColor(w.attached ? Ui.stateAttached() : Ui.stateDetached());
         r.addView(st);
 
         r.setOnClickListener(v -> {
