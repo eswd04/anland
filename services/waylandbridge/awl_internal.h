@@ -751,6 +751,8 @@ void awl_surface_view_map(struct awl_surface* root,
  * scale Z = preferred_scale/120 the client renders at — the only Z the
  * compositor side may use (configure size, 1:1 mapping). Any thread. */
 uint32_t awl_zoom_preferred_scale(void);
+/* The canvas for a window of the given size (see awl_xdg.c window_logical). */
+void awl_window_logical(int32_t pw, int32_t ph, int32_t* lw, int32_t* lh);
 double awl_zoom_scale(void);
 /* Sample-region uv transform of the current buffer (viewport source →
  * normalized; whole buffer when unset/no buffer). Caller holds ev_lock. */

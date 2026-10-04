@@ -1836,6 +1836,14 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         capture_reopen_on_attach(id);        /* constraint still active (persistent) → re-capture */
         keep_on_reopen_on_attach(id);        /* idle inhibitor alive → re-set FLAG_KEEP_SCREEN_ON */
         refresh_recheck();                    /* attach: the app just asked the display for a real rate */
+        /* the compositor's screen is the CANVAS, not the window: with a zoom the
+         * canvas is smaller, and a compositor told the window size would lay the
+         * desktop out wider than its own screen and crop it */
+        {
+            int32_t lw = 0, lh = 0;
+            awl_window_logical(w, h, &lw, &lh);
+            awl_output_set_size((uint32_t)lw, (uint32_t)lh);
+        }
         awl_output_grow((uint32_t)w, (uint32_t)h);   /* X screen must cover the X window before it is resized to us */
         awl_window_resize(id, w, h);         /* Android fully owns sizing (initial + subsequent) */
         xwm_resize_window(id, w, h);         /* Xwayland window: sync initial size to the X side */
@@ -1967,7 +1975,15 @@ static binder_status_t host_on_transact(AIBinder* binder, transaction_code_t cod
         AParcel_readInt32(in, &w);
         AParcel_readInt32(in, &h);
         if (!window_ok((uint64_t)id64)) { AParcel_writeInt32(out, -1); return STATUS_OK; }
-        awl_output_grow((uint32_t)w, (uint32_t)h);
+        /* the compositor's screen is the CANVAS (see the attach path): the
+         * canvas follows the window in the follow modes, so the announced mode
+         * has to follow too — announcing the window size here would leave the
+         * desktop laid out wider than its own screen */
+        {
+            int32_t lw = 0, lh = 0;
+            awl_window_logical(w, h, &lw, &lh);
+            awl_output_set_size((uint32_t)lw, (uint32_t)lh);
+        }
         awl_window_resize((uint64_t)id64, w, h);
         xwm_resize_window((uint64_t)id64, w, h);
         backend_request_render((uint64_t)id64);

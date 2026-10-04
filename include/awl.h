@@ -167,6 +167,19 @@ void awl_output_grow(uint32_t w, uint32_t h);
  * bound wl_output. Clients pace on this, so a wrong value makes them render
  * at the wrong cadence. Any thread. */
 void awl_output_set_refresh(int32_t hz);
+
+/* Set the announced output mode to exactly w×h and re-announce it. This is the
+ * screen size the guest compositor works with, so it must be the CANVAS (the
+ * size clients are laid out for), never the Android window: told the window
+ * size while the canvas is window/zoom, the compositor lays the desktop out
+ * wider than its own screen and crops everything past the edge. Unlike
+ * awl_output_grow it shrinks too, which a zoom change needs. Any thread. */
+void awl_output_set_size(uint32_t w, uint32_t h);
+
+/* The canvas for a window of the given Android window size: what clients are
+ * laid out for, what the output mode must announce, and (through scale_mode)
+ * what gets mapped into the window. Any thread. */
+void awl_window_logical(int32_t pw, int32_t ph, int32_t* lw, int32_t* lh);
 /* Android window resized → the renderer's cached ANativeWindow size for this
  * window is stale: drop it, the next frame re-queries and renders at the new
  * size (the original full-screen path). Called from awl_window_resize; any

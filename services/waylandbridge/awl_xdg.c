@@ -727,17 +727,6 @@ void awl_display_init_size(int32_t* w, int32_t* h) {
  * per fractional_scale). When the client does not respond (fixed-size buffer),
  * the render side scales the display by the window/root logical ratio. */
 
-/* phys → logical at the EFFECTIVE zoom Z = preferred_scale/120 (round to
- * nearest, integer math). The client renders at exactly that quantized Z
- * (kwin fractionalscale_v1: round(z×120)), so the buffer it commits is
- * round(logical×Z) px; dividing by zoom_pct/100 instead (133% vs the
- * client's 160/120) would make that buffer miss phys by a few px and the
- * 1:1 view mapping (awl_surface_view_map) would have to resample it. */
-static int32_t phys_to_logical(int32_t v) {
-    int64_t pref = awl_zoom_preferred_scale();
-    return (int32_t)(((int64_t)v * 120 + pref / 2) / pref);
-}
-
 /* Logical canvas for a toplevel at the given window size. A fixed canvas wins:
  * the client is laid out for the canvas size however big the Android window is,
  * and the presentation layer fits that canvas into the window — so the canvas
@@ -761,14 +750,13 @@ static void window_logical(int32_t pw, int32_t ph, int32_t* lw, int32_t* lh) {
          * (canvas = 0 instead lets the canvas shrink with zoom, which makes
          * the content overflow the window.) It also tracks every resize
          * (soft keyboard, split screen). */
-        /* Use the zoom PERCENTAGE here, not the advertised preferred_scale:
-         * the latter is deliberately pinned neutral (120) while a canvas is in
-         * effect, so that the client renders exactly the canvas instead of
-         * canvas x zoom (measured: 1920x1080 -> 3360x1890, 3x the pixels). The
-         * canvas division still needs the real zoom, otherwise the factor
-         * cancels out and the canvas never changes. */
+        /* The REQUESTED zoom percentage: the canvas is what the desktop is
+         * laid out for, and window/canvas is the magnification the presentation
+         * layer applies — so an exact 150% stays 150%. It used to be the
+         * "effective" (integer-snapped) zoom, which existed only because the
+         * zoom was announced as a client scale and KWin rounded it; the scale is
+         * neutral now and the output mode is the canvas, so nothing rounds. */
         int32_t zp = atomic_load(&g_srv.zoom_pct);
-        if (zp < 1) zp = 100;
         int32_t w = (int32_t)(((int64_t)(pw > 0 ? pw : 1) * 100) / zp);
         int32_t h = (int32_t)(((int64_t)(ph > 0 ? ph : 1) * 100) / zp);
         *lw = w > 0 ? w : 1;
@@ -780,8 +768,25 @@ static void window_logical(int32_t pw, int32_t ph, int32_t* lw, int32_t* lh) {
         *lh = ch;
         return;
     }
-    *lw = phys_to_logical(pw);
-    *lh = phys_to_logical(ph);
+    /* legacy canvas = 0: same division as -1 (see above) — the canvas is what
+     * the client is laid out for, and the zoom is expressed by the presentation
+     * layer, not by a client scale */
+    {
+        int32_t zp = atomic_load(&g_srv.zoom_pct);
+        if (zp < 1) zp = 100;
+        *lw = (int32_t)(((int64_t)(pw > 0 ? pw : 1) * 100) / zp);
+        *lh = (int32_t)(((int64_t)(ph > 0 ? ph : 1) * 100) / zp);
+        if (*lw < 1) *lw = 1;
+        if (*lh < 1) *lh = 1;
+    }
+}
+
+/* The canvas for a window of this size — the size clients are laid out for, the
+ * size the output mode must announce, and (through scale_mode) what gets mapped
+ * into the window. Exposed so the binder path can keep the announced output in
+ * step with it. Any thread. */
+void awl_window_logical(int32_t pw, int32_t ph, int32_t* lw, int32_t* lh) {
+    window_logical(pw, ph, lw, lh);
 }
 
 /* Send one configure with the window's current logical size, whether or not it
@@ -789,6 +794,7 @@ static void window_logical(int32_t pw, int32_t ph, int32_t* lw, int32_t* lh) {
  * needless re-layouts away), so this is the explicit "re-announce" path used
  * when only the scale or the canvas changed. */
 void awl_window_reconfigure(uint64_t id) {
+    int32_t ow = 0, oh = 0;   /* canvas to announce, 0 = nothing to do */
     pthread_rwlock_rdlock(&g_srv.rwl);
     struct awl_surface* s = awl_surface_by_id(id);
     if (s && s->role == AWL_ROLE_TOPLEVEL) {
@@ -799,10 +805,20 @@ void awl_window_reconfigure(uint64_t id) {
             LOGD("window %llu reconfigure %dx%d", (unsigned long long)id, lw, lh);
             send_configure_locked(s, lw, lh, NULL, 0);
             wl_client_flush(wl_resource_get_client(s->u.xdg.role_res));
+            ow = lw;
+            oh = lh;
         }
         pthread_mutex_unlock(&s->ev_lock);
     }
     pthread_rwlock_unlock(&g_srv.rwl);
+    /* The compositor's screen is the canvas, so a zoom or canvas change moves
+     * both together — but the announcement must happen OUTSIDE the read lock
+     * above: awl_output_set_size takes the same rwlock for WRITING, and a
+     * pthread rwlock cannot be upgraded, so calling it while holding the read
+     * lock deadlocks against itself. On device that hung the daemon, every app
+     * binder call queued behind it, and the app was ANR-killed. */
+    if (ow > 0 && oh > 0)
+        awl_output_set_size((uint32_t)ow, (uint32_t)oh);
 }
 
 void awl_windows_reconfigure_all(void) {

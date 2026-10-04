@@ -101,6 +101,37 @@ void awl_output_set_refresh(int32_t hz) {
     LOGI("output refresh → %d Hz (re-announced)", hz);
 }
 
+/* Any thread. Sets the announced output mode to exactly w×h and re-sends the
+ * output state to every bound wl_output.
+ *
+ * This is what tells the guest compositor how big its screen is, and it has to
+ * be the CANVAS — not the Android window. KWin lays its windows out inside this
+ * screen; if it is told the window size while the canvas is window/zoom, the
+ * desktop is wider than its own screen and everything past the edge is cropped
+ * (measured: settings window lost its right-hand column at 175%). Equal numbers
+ * mean a complete frame at any zoom. Unlike awl_output_grow this SHRINKS too,
+ * which a zoom change needs.
+ *
+ * Refuses a degenerate size: a zero-size mode makes clients divide by zero. */
+void awl_output_set_size(uint32_t w, uint32_t h) {
+    if (w < 1 || h < 1) return;
+    if (!g_srv.running) return;
+    pthread_rwlock_wrlock(&g_srv.rwl);
+    if (g_srv.info.width == w && g_srv.info.height == h) {
+        pthread_rwlock_unlock(&g_srv.rwl);
+        return;
+    }
+    g_srv.info.width = w;
+    g_srv.info.height = h;
+    struct awl_output_res* o;
+    wl_list_for_each(o, &g_outputs, link) {
+        output_send_state(o->res);
+        wl_client_flush(wl_resource_get_client(o->res));
+    }
+    pthread_rwlock_unlock(&g_srv.rwl);
+    LOGI("output mode → %ux%u (the canvas the compositor must fit into)", w, h);
+}
+
 /* Any thread (binder SURFACE/RESIZE). Grows the output mode to cover w×h
  * (physical px, per-axis max, never shrinks) and re-announces it to every
  * bound wl_output; a no-op when the window already fits. */

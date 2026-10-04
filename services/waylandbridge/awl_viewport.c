@@ -397,25 +397,7 @@ struct awl_frac_scale {
 };
 
 static uint32_t zoom_preferred_scale(void) {
-    /* The client allocates buffer = configure_size x preferred_scale.
-     *
-     * Follow the window (canvas < 0): the canvas is window/zoom, so the zoom is
-     * what brings the buffer back up to the window's own resolution
-     * (window/zoom x zoom = window). Advertising it is what makes the frame 1:1
-     * - pinning 1.0 made the client render at window/zoom and the presentation
-     * layer upscale it, which is the reported blur.
-     *
-     * Fixed canvas (> 0): the canvas does not depend on zoom, so advertising the
-     * zoom would only multiply the buffer (3x at 175% on a 1920x1080 canvas)
-     * while the picture stays identical - the content is normalised into the
-     * window either way. Stay neutral so the buffer matches the canvas.
-     * Downscaling to the window is not what blurs; upscaling is. */
-    int32_t cw = 0, ch = 0;
-    awl_display_canvas(&cw, &ch);
-    if (cw > 0 || ch > 0 || cw == -2)
-        return 120;   /* fixed canvas, or canvas == window: buffer == canvas */
-    /* kwin: round(z * 120); integer zoom_pct avoids float drift */
-    return (uint32_t)((g_srv.zoom_pct * 120 + 50) / 100);
+    return 120;
 }
 
 uint32_t awl_zoom_preferred_scale(void) {
