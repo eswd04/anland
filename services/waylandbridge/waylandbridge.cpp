@@ -83,7 +83,7 @@ static std::atomic<bool> g_cfg_xwayland_scale{true};
  * atomic like g_cfg_sc; a flip takes effect on the next configure. */
 static std::atomic<bool> g_cfg_next_serial{true};
 
-bool awl_cfg_next_serial(void) {
+extern "C" bool awl_cfg_next_serial(void) {
     return g_cfg_next_serial.load(std::memory_order_relaxed);
 }
 /* Both backends are keyed by window id and mutually exclusive per id: an

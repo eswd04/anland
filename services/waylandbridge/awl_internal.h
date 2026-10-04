@@ -738,6 +738,12 @@ void awl_client_maybe_migrate(struct wl_client* client);
  * is what clients that validate the serial need), 0 = the legacy
  * wl_display_get_serial, which is 0 until some input event has
  * allocated one. Defined in waylandbridge.cpp. */
+#ifdef __cplusplus
+extern "C" {
+#endif
 bool awl_cfg_next_serial(void);
+#ifdef __cplusplus
+}
+#endif
 
 #endif
