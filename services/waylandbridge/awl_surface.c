@@ -156,12 +156,18 @@ void awl_surface_apply_buffer(struct awl_surface* s, struct wl_resource* res,
     if (!res) {
         awl_surface_discard_sync(acquire_fd, release_res);   /* commit_check already refused these; defensive */
         s->shm_live = 0;
+        s->shm_solid = 0;
         shm_release_locked(s);   /* an unread shm source goes back with the unmap */
         s->shm_res = NULL;
         q_push_null(s);
         return;
     }
-    if (wl_shm_buffer_get(res)) {
+    /* A single-pixel buffer is a colour the renderer samples like an shm
+     * source, so it takes the same bookkeeping path: no queue, read at frame
+     * time, wl_buffer.release owed once read. */
+    struct awl_buffer* sb = wl_resource_get_user_data(res);
+    const int solid = sb && sb->solid && !wl_shm_buffer_get(res);
+    if (wl_shm_buffer_get(res) || solid) {
         if (acquire_fd >= 0) close(acquire_fd);   /* unsupported_buffer was posted by commit_check */
         if (s->shm_res != res) {
             shm_release_locked(s);   /* superseded before any backend read it (detached window) */
@@ -176,12 +182,15 @@ void awl_surface_apply_buffer(struct awl_surface* s, struct wl_resource* res,
         s->shm_release_pending = 1;
         s->shm_release_res = release_res;
         s->shm_live = 1;
+        s->shm_solid = (unsigned)solid;
+        if (solid) s->solid_color = sb->solid_color;
         s->shm_serial++;
         if (s->q_last_dmabuf) q_push_null(s);   /* the consumer must drop the dmabuf head */
         return;
     }
     /* dmabuf: a shm source (if any) is superseded */
     s->shm_live = 0;
+    s->shm_solid = 0;
     shm_release_locked(s);
     s->shm_res = NULL;
     struct awl_buffer* b = wl_resource_get_user_data(res);
@@ -580,6 +589,11 @@ static void surface_destroy_impl(struct wl_resource* res) {
     struct awl_frame_cb* tmp;
     wl_list_for_each_safe(cb, tmp, &s->frame_callbacks, link) {
         wl_resource_destroy(cb->resource);   /* listener removes+frees under ev_lock */
+    }
+    struct awl_pres_fb* pf;
+    struct awl_pres_fb* pf_tmp;
+    wl_list_for_each_safe(pf, pf_tmp, &s->pres_fbs, link) {
+        wl_resource_destroy(pf->resource);   /* same rule */
     }
     /* On disconnect wl_map destroys in id order: wl_surface before
      * xdg_surface/toplevel/popup — strip their back-references, otherwise
@@ -1075,6 +1089,7 @@ static void compositor_create_surface(struct wl_client* client,
         pthread_mutexattr_destroy(&attr);
     }
     wl_list_init(&s->frame_callbacks);
+    wl_list_init(&s->pres_fbs);
     wl_list_init(&s->sub_children);
     wl_list_init(&s->sub_below);
     wl_list_init(&s->sub_above);
@@ -1175,17 +1190,29 @@ int awl_surface_shm_begin(uint64_t id, uint64_t have_serial, awl_shm_frame_t* f)
     }
     struct wl_shm_buffer* shm =
         s->current_buffer_res ? wl_shm_buffer_get(s->current_buffer_res) : NULL;
-    if (!shm || s->shm_serial == have_serial) {   /* nothing new / buffer already destroyed */
+    if ((!shm && !s->shm_solid) || s->shm_serial == have_serial) {   /* nothing new / buffer already destroyed */
         pthread_mutex_unlock(&s->ev_lock);
         pthread_rwlock_unlock(&g_srv.rwl);
         return 2;
     }
-    wl_shm_buffer_begin_access(shm);
-    f->width = (uint32_t)wl_shm_buffer_get_width(shm);
-    f->height = (uint32_t)wl_shm_buffer_get_height(shm);
-    f->stride = (uint32_t)wl_shm_buffer_get_stride(shm);
-    f->format = shm_fourcc(wl_shm_buffer_get_format(shm));
-    f->pixels = wl_shm_buffer_get_data(shm);
+    if (shm) {
+        wl_shm_buffer_begin_access(shm);
+        f->width = (uint32_t)wl_shm_buffer_get_width(shm);
+        f->height = (uint32_t)wl_shm_buffer_get_height(shm);
+        f->stride = (uint32_t)wl_shm_buffer_get_stride(shm);
+        f->format = shm_fourcc(wl_shm_buffer_get_format(shm));
+        f->pixels = wl_shm_buffer_get_data(shm);
+    } else {
+        /* single-pixel source: no pool to read, the colour is ours. 1x1 — the
+         * client scales it with the viewport, which is the intended use.
+         * Valid while the locks below are held, exactly like the pool
+         * pointer above. */
+        f->width = 1;
+        f->height = 1;
+        f->stride = 4;
+        f->format = AWL_FORMAT_ARGB8888;
+        f->pixels = &s->solid_color;
+    }
     f->dmg_full = s->cd_state == AWL_DMG_FULL;
     if (s->cd_state == AWL_DMG_RECT) {
         f->dmg_x = s->cur_damage_x; f->dmg_y = s->cur_damage_y;
@@ -1233,6 +1260,9 @@ void awl_surface_presented(uint64_t id) {
         wl_callback_send_done(cb->resource, awl_now_ms());
         cb->detached = 1;
     }
+    /* presentation-time: same thread and lock as the frame callbacks above,
+     * send-only (the objects are retired on the dispatch thread) */
+    awl_presentation_presented(s);
     /* (buffer releases are not tied to presentation any more: they go out
      * when the frame leaves the surface's queue — bq_release_cb) */
     wl_client_flush(wl_resource_get_client(s->resource));

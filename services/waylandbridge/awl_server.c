@@ -397,6 +397,8 @@ int awl_server_start(int listen_fd, const awl_display_info_t* info,
     awl_idle_setup();         /* zwp_idle_inhibit_manager_v1 (keep-screen-on, C_KEEPON) */
     awl_icon_setup();         /* xdg_toplevel_icon_manager_v1 (per-window icons, C_ICON) */
     awl_esync_setup();        /* zwp_linux_explicit_synchronization_v1 (acquire/release fences) */
+    awl_single_pixel_setup(); /* wp_single_pixel_buffer_manager_v1 (solid colours) */
+    awl_presentation_setup(); /* wp_presentation (frame timing feedback) */
 
     if (!wl_global_create(g_srv.display, &wl_output_interface, 3,
                           NULL, output_bind))

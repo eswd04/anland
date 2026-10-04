@@ -15,6 +15,8 @@
 #include "wayland-server-protocol-core.h"
 #include "linux-dmabuf-unstable-v1-server-protocol.h"
 #include "xdg-shell-server-protocol.h"
+#include "single-pixel-buffer-v1-server-protocol.h"
+#include "presentation-time-server-protocol.h"
 #include "awl_bufferqueue.h"
 #include "awl_log.h"   /* AWL_TAG "anland-wl" + LOGI/LOGE/LOGD (see awl_log.h) */
 
@@ -78,12 +80,26 @@ struct awl_buffer {
                                       * fall back to their own) */
     uint32_t width, height, stride;  /* stride: bytes */
     uint32_t drm_format;
+    /* wp_single_pixel_buffer_manager_v1: this buffer is a colour, not
+     * memory. solid_color is premultiplied ARGB8888 and dmabuf_fd stays -1;
+     * the surface reports it to the renderer as a 1x1 source. */
+    uint32_t solid_color;
+    unsigned solid : 1;
 };
 
 struct awl_frame_cb {
     struct wl_resource* resource;
     struct awl_surface* s;           /* owner for backfill (destroy listener takes lock via it) */
     int detached;                    /* done sent; parked until dispatch-thread destruction */
+    struct wl_list link;
+};
+
+/* wp_presentation_feedback awaiting the next present of its surface. Same
+ * parked-until-dispatch-thread retirement as the frame callbacks above. */
+struct awl_pres_fb {
+    struct wl_resource* resource;
+    struct awl_surface* s;
+    int detached;                    /* presented/discarded sent; parked */
     struct wl_list link;
 };
 
@@ -154,6 +170,9 @@ struct awl_surface {
     struct wl_resource* current_buffer_res;
 
     struct wl_list frame_callbacks;
+
+    /* wp_presentation_feedback pending for this surface (awl_presentation.c) */
+    struct wl_list pres_fbs;
 
     /* ---- wl_surface.set_input_region / set_opaque_region (#85) ----
      * Double-buffered: pend_* is the wl_region snapshot taken at request time
@@ -253,6 +272,7 @@ struct awl_surface {
                                       * viewport state — the render side reads it per frame. */
     int32_t pend_buf_transform;      /* -1 = nothing pending */
     int32_t vp_dst_w, vp_dst_h;      /* viewport dst logical size (0=unset) */
+    uint32_t solid_color;            /* shm_solid: colour the 1x1 source reports (premultiplied ARGB8888) */
     int32_t pend_vpd_w, pend_vpd_h;
     float vp_sx, vp_sy, vp_sw, vp_sh;      /* source rectangle (buffer×buf_scale coords) */
     float pend_vps_x, pend_vps_y, pend_vps_w, pend_vps_h;
@@ -300,6 +320,7 @@ struct awl_surface {
     unsigned shm_live : 1;              /* committed content is a shm buffer (cleared by
                                           * attach(NULL) / a dmabuf attach) */
     unsigned shm_release_pending : 1;   /* wl_buffer.release for shm_res not sent yet */
+    unsigned shm_solid : 1;             /* the shm source is a single-pixel buffer, not a client pool */
     unsigned q_last_dmabuf : 1;         /* the newest push was a dmabuf frame */
     unsigned cd_state : 2;              /* AWL_DMG_* (NONE = 0, calloc-init) */
     /* plain ints (real values / addressable — never bit-fields). These also
@@ -745,5 +766,14 @@ bool awl_cfg_next_serial(void);
 #ifdef __cplusplus
 }
 #endif
+
+/* wp_single_pixel_buffer_manager_v1 (awl_single_pixel.c) */
+void awl_single_pixel_setup(void);
+
+/* wp_presentation / presentation-time (awl_presentation.c). presented() runs
+ * with s->ev_lock held, from awl_surface_presented() — send only, the
+ * feedback objects are retired on the dispatch thread. */
+void awl_presentation_setup(void);
+void awl_presentation_presented(struct awl_surface* s);
 
 #endif

@@ -73,6 +73,31 @@ add_custom_command(
           ${AWL_GENERATED}/linux-dmabuf-unstable-v1-protocol.c
   DEPENDS ${DMABUF_XML})
 
+# single-pixel-buffer v1 (staging) + presentation-time codegen. KWin's nested
+# Wayland backend refuses to start without both globals.
+set(SPB_XML ${CMAKE_CURRENT_SOURCE_DIR}/protocols/single-pixel-buffer-v1.xml)
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/single-pixel-buffer-v1-server-protocol.h
+  COMMAND ${WAYLAND_SCANNER} server-header ${SPB_XML}
+          ${AWL_GENERATED}/single-pixel-buffer-v1-server-protocol.h
+  DEPENDS ${SPB_XML})
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/single-pixel-buffer-v1-protocol.c
+  COMMAND ${WAYLAND_SCANNER} private-code ${SPB_XML}
+          ${AWL_GENERATED}/single-pixel-buffer-v1-protocol.c
+  DEPENDS ${SPB_XML})
+set(PRES_XML ${CMAKE_CURRENT_SOURCE_DIR}/protocols/presentation-time.xml)
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/presentation-time-server-protocol.h
+  COMMAND ${WAYLAND_SCANNER} server-header ${PRES_XML}
+          ${AWL_GENERATED}/presentation-time-server-protocol.h
+  DEPENDS ${PRES_XML})
+add_custom_command(
+  OUTPUT ${AWL_GENERATED}/presentation-time-protocol.c
+  COMMAND ${WAYLAND_SCANNER} private-code ${PRES_XML}
+          ${AWL_GENERATED}/presentation-time-protocol.c
+  DEPENDS ${PRES_XML})
+
 # xdg-shell protocol codegen (window management)
 set(XDG_XML ${CMAKE_CURRENT_SOURCE_DIR}/protocols/xdg-shell.xml)
 add_custom_command(
@@ -323,6 +348,8 @@ add_executable(waylandbridge
   awl_sched.c
   awl_bufferqueue.c
   awl_esync.c
+  awl_single_pixel.c
+  awl_presentation.c
   ${AWL_GENERATED}/linux-explicit-synchronization-unstable-v1-protocol.c
   ${AWL_GENERATED}/linux-explicit-synchronization-unstable-v1-server-protocol.h
   ${AWL_GENERATED}/xwayland-shell-v1-protocol.c
@@ -341,6 +368,10 @@ add_executable(waylandbridge
   ${AWL_GENERATED}/fractional-scale-v1-server-protocol.h
   ${AWL_GENERATED}/linux-dmabuf-unstable-v1-protocol.c
   ${AWL_GENERATED}/linux-dmabuf-unstable-v1-server-protocol.h
+  ${AWL_GENERATED}/single-pixel-buffer-v1-protocol.c
+  ${AWL_GENERATED}/single-pixel-buffer-v1-server-protocol.h
+  ${AWL_GENERATED}/presentation-time-protocol.c
+  ${AWL_GENERATED}/presentation-time-server-protocol.h
   ${AWL_GENERATED}/xdg-shell-protocol.c
   ${AWL_GENERATED}/xdg-shell-server-protocol.h
   ${AWL_GENERATED}/text-input-unstable-v1-protocol.c
